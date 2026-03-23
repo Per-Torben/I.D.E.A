@@ -55,6 +55,33 @@ Resolves complex PIM chains, nested groups, and group eligibility scenarios to p
 
 ---
 
+---
+
+### [I.D.E.A. 003 – M365 Certificate App Registration](IDEA-003-CertAppRegistration/)
+Interactive, menu-driven tool that creates Microsoft Entra ID app registrations with **certificate-based authentication** for one or more M365 services — and generates ready-to-use PowerShell connection scripts for each.
+
+**Key Capabilities**
+- Service selection menu: Microsoft Graph / Entra ID, Microsoft Teams, Exchange Online, SharePoint Online (single or all)
+- Certificate menu: create new self-signed (4096-bit RSA, configurable duration, default 180 days) or use an existing `.cer` file
+- Per-service permission review with toggle menu — defaults are minimal/read-only, optional extras can be enabled
+- App name prefix prompt with full preview table of app names and output file names before creating
+- Creates one app registration per service, attaches shared certificate, grants admin consent
+- Automatically assigns Teams Administrator and Exchange Administrator roles to respective apps
+- Generates service-specific connection `.ps1` scripts and a unified config JSON in `.\exports\`
+
+**Generated Files (per prefix)**
+- `{Prefix}-Connect-MicrosoftGraph.ps1` — `Connect-MgGraph` with cert params filled in
+- `{Prefix}-Connect-MicrosoftTeams.ps1` — `Connect-MicrosoftTeams` with cert params filled in
+- `{Prefix}-Connect-ExchangeOnline.ps1` — `Connect-ExchangeOnline` with cert params filled in
+- `{Prefix}-Connect-SharePointOnline.ps1` — `Connect-PnPOnline` with cert params filled in
+- `{Prefix}-Config.json` — all ClientIds, TenantId and thumbprint in one file
+
+**Use Case:** Eliminates the manual, repetitive work of setting up multiple app registrations for certificate-based PowerShell automation across M365 services. Produces connection scripts that are ready to use immediately after the script completes.
+
+📖 **[Full Documentation](IDEA-003-CertAppRegistration/README.md)**
+
+---
+
 ## Getting Started
 1. Browse the I.D.E.A. folders above  
 2. Read the specific README.md for prerequisites and usage  
