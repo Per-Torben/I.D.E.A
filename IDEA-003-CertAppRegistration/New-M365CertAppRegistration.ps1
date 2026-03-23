@@ -383,6 +383,10 @@ function Show-PermissionsMenu {
         Write-Host ''
         Write-Host "  Permissions for $($def.DisplayName):" -ForegroundColor Yellow
         Write-Host ''
+        Write-Host '  Review the permissions below. Pre-selected [✓] items are the recommended defaults.' -ForegroundColor White
+        Write-Host '  To add or remove a permission, type its number and press Enter.' -ForegroundColor White
+        Write-Host '  When you are done, type A and press Enter to accept and move on.' -ForegroundColor White
+        Write-Host ''
         Write-Host ('  {0,-4} {1,-6}  {2,-44}  {3}' -f '#', 'On/Off', 'Permission', 'Description') -ForegroundColor DarkGray
         Write-Host ('  {0,-4} {1,-6}  {2,-44}  {3}' -f '─', '──────', '────────────────────────────────────────────', '──────────────────────') -ForegroundColor DarkGray
 
@@ -394,7 +398,9 @@ function Show-PermissionsMenu {
         }
 
         Write-Host ''
-        Write-Host '  [A] Accept   [R] Reset to defaults   [number] Toggle permission' -ForegroundColor DarkGray
+        Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor DarkGray
+        Write-Host "  [A] Accept and continue   [R] Reset to defaults   [1-$($permissions.Count)] Toggle permission" -ForegroundColor DarkGray
+        Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '  Action: ' -NoNewline -ForegroundColor Cyan
         $userInput = (Read-Host).Trim()
@@ -403,6 +409,7 @@ function Show-PermissionsMenu {
 
         if ($userInput -match '^[Rr]$') {
             [bool[]]$selected = $permissions | ForEach-Object { $_.Default }
+            Write-Host '  ↺ Permissions reset to defaults.' -ForegroundColor Yellow
             continue
         }
 
@@ -411,7 +418,7 @@ function Show-PermissionsMenu {
             $selected[$num - 1] = -not $selected[$num - 1]
         }
         else {
-            Write-Host "  ✗ Invalid input. Enter 1–$($permissions.Count), A or R." -ForegroundColor Red
+            Write-Host "  ✗ Invalid input. Type a number (1–$($permissions.Count)) to toggle, A to accept, or R to reset." -ForegroundColor Red
         }
     }
 
@@ -458,16 +465,13 @@ function Get-AppNamePrefix {
         Write-Host ''
         Write-Host '  Preview — the following will be created:' -ForegroundColor Yellow
         Write-Host ''
-        Write-Host '  App Registrations (in Entra ID):' -ForegroundColor White
         foreach ($svc in $SelectedServices) {
-            Write-Host "    • $prefix-$svc" -ForegroundColor Gray
+            $def = $script:ServiceDefinitions[$svc]
+            Write-Host "  $($def.DisplayName)" -ForegroundColor White
+            Write-Host "    App name : $prefix-$svc" -ForegroundColor Gray
+            Write-Host "    File name: $prefix-Connect-$svc.ps1" -ForegroundColor Gray
+            Write-Host ''
         }
-        Write-Host ''
-        Write-Host '  Connection Scripts (in .\exports\):' -ForegroundColor White
-        foreach ($svc in $SelectedServices) {
-            Write-Host "    • $prefix-Connect-$svc.ps1" -ForegroundColor Gray
-        }
-        Write-Host ''
         Write-Host "  Config JSON: $prefix-Config.json" -ForegroundColor Gray
         Write-Host ''
         Write-Host '  Confirm prefix? [Y] Accept  [N] Enter different prefix: ' -NoNewline -ForegroundColor Cyan
