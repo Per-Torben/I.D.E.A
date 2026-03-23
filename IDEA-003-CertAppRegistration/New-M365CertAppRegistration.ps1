@@ -235,23 +235,23 @@ function Show-ServiceSelectionMenu {
             return @('MicrosoftGraph', 'MicrosoftTeams', 'ExchangeOnline', 'SharePointOnline')
         }
 
-        $tokens   = $userInput -split ',' | ForEach-Object { $_.Trim() }
-        $valid    = $script:ServiceMap.Keys
-        $invalid  = $tokens | Where-Object { $_ -notin $valid }
+        $tokens   = @($userInput -split ',' | ForEach-Object { $_.Trim() })
+        $valid    = @($script:ServiceMap.Keys)
+        $invalid  = @($tokens | Where-Object { $_ -notin $valid })
 
-        if ($invalid) {
+        if ($invalid.Count -gt 0) {
             Write-Host "  ✗ Invalid selection: $($invalid -join ', '). Enter numbers 1–4, A or Q." -ForegroundColor Red
             continue
         }
 
-        $selected = $tokens | ForEach-Object { $script:ServiceMap[$_] } | Select-Object -Unique
+        $selected = @($tokens | ForEach-Object { $script:ServiceMap[$_] } | Select-Object -Unique)
 
         if ($selected.Count -eq 0) {
             Write-Host '  ✗ No valid services selected. Please try again.' -ForegroundColor Red
             continue
         }
 
-        return $selected
+        return [string[]]$selected
     }
 }
 
@@ -1097,10 +1097,43 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     if ($certChoice -eq '2') {
         Write-Host ''
-        Write-Host '  Path to .cer file: ' -NoNewline -ForegroundColor Cyan
-        $cerPathInput = (Read-Host).Trim().Trim('"')
-        $certificate  = Import-ExistingCertificate -CertificatePath $cerPathInput
-        $certMode     = 'Existing .cer file'
+
+        # Try Windows file picker first; fall back to manual entry if not available
+        $cerPathInput = $null
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            $dialog                  = New-Object System.Windows.Forms.OpenFileDialog
+            $dialog.Title            = 'Select certificate file (.cer)'
+            $dialog.Filter           = 'Certificate files (*.cer)|*.cer|All files (*.*)|*.*'
+            $dialog.InitialDirectory = [Environment]::GetFolderPath('MyDocuments')
+            $dialog.Multiselect      = $false
+
+            Write-Host '  Opening file browser — select your .cer file...' -ForegroundColor Cyan
+            $result = $dialog.ShowDialog()
+
+            if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+                $cerPathInput = $dialog.FileName
+                Write-Host "  Selected: $cerPathInput" -ForegroundColor Gray
+            }
+            else {
+                Write-Log 'File selection cancelled.' -Level 'WARNING'
+                exit 0
+            }
+        }
+        catch {
+            # Windows Forms not available — fall back to manual entry
+            Write-Host '  Path to .cer file: ' -NoNewline -ForegroundColor Cyan
+            while ([string]::IsNullOrWhiteSpace($cerPathInput)) {
+                $cerPathInput = (Read-Host).Trim().Trim('"')
+                if ([string]::IsNullOrWhiteSpace($cerPathInput)) {
+                    Write-Host '  ✗ Path cannot be empty. Try again: ' -NoNewline -ForegroundColor Red
+                }
+            }
+        }
+
+        Write-Host ''
+        $certificate = Import-ExistingCertificate -CertificatePath $cerPathInput
+        $certMode    = "Existing .cer file ($([System.IO.Path]::GetFileName($cerPathInput)))"
     }
 
     # ── Step 3: Permissions per service ───────────────────────────────────────
@@ -1222,7 +1255,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     # ── Final summary ──────────────────────────────────────────────────────────
-    $completedServices = $selectedServices | Where-Object { $appResults.ContainsKey($_) }
+    $completedServices = @($selectedServices | Where-Object { $appResults.ContainsKey($_) })
 
     Show-CompletionSummary `
         -Prefix           $prefix `
