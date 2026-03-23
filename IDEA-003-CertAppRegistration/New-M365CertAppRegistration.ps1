@@ -202,7 +202,7 @@ function Show-Banner {
     Clear-Host
     Write-Host ''
     Write-Host '╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
-    Write-Host '║        I.D.E.A. 003 – M365 Certificate App Registration             ║' -ForegroundColor Cyan
+    Write-Host '║        I.D.E.A. 003 - M365 Certificate App Registration              ║' -ForegroundColor Cyan
     Write-Host '║                                                                      ║' -ForegroundColor Cyan
     Write-Host '║  Creates Entra ID app registrations with certificate authentication  ║' -ForegroundColor Cyan
     Write-Host '║  for Microsoft Graph, Teams, Exchange Online and SharePoint Online   ║' -ForegroundColor Cyan
