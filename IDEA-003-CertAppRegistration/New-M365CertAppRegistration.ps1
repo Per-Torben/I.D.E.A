@@ -472,7 +472,9 @@ function Get-AppNamePrefix {
             Write-Host "    File name: $prefix-Connect-$svc.ps1" -ForegroundColor Gray
             Write-Host ''
         }
-        Write-Host "  Config JSON: $prefix-Config.json" -ForegroundColor Gray
+        Write-Host "  Config file : $prefix-Config.json" -ForegroundColor Gray
+        Write-Host '              (stores all ClientIds, TenantId and certificate thumbprint in one place,' -ForegroundColor DarkGray
+        Write-Host '               useful as a reference or for scripting against multiple services)' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '  Confirm prefix? [Y] Accept  [N] Enter different prefix: ' -NoNewline -ForegroundColor Cyan
         $answer = (Read-Host).Trim()
