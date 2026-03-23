@@ -19,8 +19,16 @@
       4. Assigns required admin roles (Teams Administrator / Exchange Administrator)
       5. Exports a ready-to-use connection .ps1 script to .\exports\
 
-    A shared config JSON ({Prefix}-Config.json) is also written to .\exports\ containing
-    all ClientIds, TenantId, and the certificate thumbprint.
+    A config JSON file ({Prefix}-Config.json) is written to .\exports\ as a consolidated
+    reference for everything created in the session. It contains the TenantId, certificate
+    thumbprint, and the ClientId + connection script name for each registered service.
+
+    Use cases for the config JSON:
+      • Quick reference — look up any ClientId or thumbprint without opening the Entra portal
+      • Script reuse   — other scripts can load it with ConvertFrom-Json to retrieve connection
+                         parameters dynamically instead of hardcoding GUIDs
+      • Onboarding     — share with a colleague so they know which app connects to which service
+      • Certificate renewal — when the cert expires, the file shows exactly which apps to update
 
     App Registration names:
       {Prefix}-MicrosoftGraph
