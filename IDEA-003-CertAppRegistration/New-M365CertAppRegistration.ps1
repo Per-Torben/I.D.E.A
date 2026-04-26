@@ -10,7 +10,7 @@
       - Microsoft Graph / Entra ID
       - Microsoft Teams
       - Exchange Online
-      - SharePoint Online
+      - SharePoint Online (PnP.PowerShell)
 
     For each selected service the script:
       1. Creates an app registration and service principal in Entra ID
@@ -225,7 +225,7 @@ function Show-ServiceSelectionMenu {
     Write-Host '    [1]  Microsoft Graph / Entra ID' -ForegroundColor White
     Write-Host '    [2]  Microsoft Teams' -ForegroundColor White
     Write-Host '    [3]  Exchange Online' -ForegroundColor White
-    Write-Host '    [4]  SharePoint Online' -ForegroundColor White
+    Write-Host '    [4]  SharePoint Online (PnP.PowerShell)' -ForegroundColor White
     Write-Host '    [A]  All services' -ForegroundColor White
     Write-Host '    [Q]  Quit' -ForegroundColor White
     Write-Host ''
