@@ -55,8 +55,6 @@ Resolves complex PIM chains, nested groups, and group eligibility scenarios to p
 
 ---
 
----
-
 ### [I.D.E.A. 003 – M365 Certificate App Registration](IDEA-003-CertAppRegistration/)
 Interactive, menu-driven tool that creates Microsoft Entra ID app registrations with **certificate-based authentication** for one or more M365 services — and generates ready-to-use PowerShell connection scripts for each.
 
