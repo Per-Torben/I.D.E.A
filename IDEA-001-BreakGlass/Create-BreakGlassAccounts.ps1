@@ -412,7 +412,7 @@ function Add-GlobalAdminRole {
     Write-Log "Adding Global Administrator role to break-glass accounts..." -Level Info
     
     try {
-        $gaRole = (Get-MgBetaRoleManagementDirectoryRoleDefinition -Filter "displayName eq '$($Config.RoleName)'").Id
+        $gaRole = (Get-MgBetaDirectoryRole -Filter "displayName eq '$($Config.RoleName)'" -ErrorAction SilentlyContinue).Id
         if (-not $gaRole) {
             throw "Could not find Global Administrator role"
         }
@@ -421,7 +421,7 @@ function Add-GlobalAdminRole {
         
         foreach ($user in $breakGlassUsers) {
             try {
-                New-MgBetaRoleManagementDirectoryRoleAssignment -PrincipalId $user.Id -RoleDefinitionId $gaRole -DirectoryScopeId "/"
+                New-MgBetaDirectoryRoleMemberByRef -DirectoryRoleId $gaRole -BodyParameter @{"@odata.id" = "https://graph.microsoft.com/beta/directoryObjects/$($user.Id)"}
                 Write-Log "Assigned Global Administrator role to $($user.UserPrincipalName)" -Level Success
             }
             catch {
@@ -838,7 +838,7 @@ function Remove-FromConditionalAccessPolicies {
 #endregion
 
 #region FIDO2 Registration Workflow
-function Register-Passkey {
+function Invoke-LocalPasskeyRegistration {
     param (
         [string]$UPN,
         [string]$DisplayName
@@ -846,7 +846,7 @@ function Register-Passkey {
     try {
         Write-Log "Generating FIDO2 options for $UPN with display name '$DisplayName'" -Level Info
         $FIDO2Options = Get-PasskeyRegistrationOptions -UserId $UPN -ErrorAction Stop
-        $FIDO2 = New-Passkey -Options $FIDO2Options -DisplayName $DisplayName -ErrorAction Stop
+        $FIDO2 = New-Passkey -Options $FIDO2Options -ErrorAction Stop
         Write-Log "Successfully created passkey for $UPN" -Level Success
         return $FIDO2
     } catch {
@@ -859,29 +859,11 @@ function Register-FIDO2KeyInEntraID {
     param (
         [string]$UPN,
         [string]$DisplayName,
-        [PSCustomObject]$FIDO2
+        [DSInternals.Win32.WebAuthn.AttestationPublicKeyCredential]$FIDO2
     )
     try {
         Write-Log "Registering FIDO2 key '$DisplayName' in Entra ID for $UPN" -Level Info
-        
-        $URI = "https://graph.microsoft.com/beta/users/$UPN/authentication/fido2Methods"
-        $FIDO2JSON = $FIDO2 | ConvertFrom-Json 
-        $AttestationObject = $FIDO2JSON.publicKeyCredential.response.attestationObject
-        $ClientDataJson = $FIDO2JSON.publicKeyCredential.response.clientDataJSON
-        $Id = $FIDO2JSON.publicKeyCredential.id
-        
-        $Body = @{
-            displayName = $DisplayName
-            publicKeyCredential = @{
-                id = $Id
-                response = @{
-                    clientDataJSON = $ClientDataJson
-                    attestationObject = $AttestationObject
-                }
-            }
-        }
-        
-        Invoke-MgGraphRequest -Method 'POST' -Body $Body -OutputType 'Json' -ContentType 'application/json' -Uri $URI
+        Register-EntraPasskey -UserId $UPN -Passkey $FIDO2 -DisplayName $DisplayName -ErrorAction Stop
         Write-Log "Successfully registered FIDO2 key '$DisplayName' in Entra ID for $UPN" -Level Success
     } catch {
         Write-Log "Failed to register the FIDO2 key '$DisplayName' in Entra ID for $UPN`: $_" -Level Error
@@ -920,7 +902,7 @@ function Register-FIDO2KeysForUsers {
                 }
                 else {
                     # Register the FIDO2 key
-                    $fido2Key = Register-Passkey -UPN $upn -DisplayName $displayName
+                    $fido2Key = Invoke-LocalPasskeyRegistration -UPN $upn -DisplayName $displayName
                     Start-Sleep 2
                     
                     # Register the FIDO2 key in Entra ID
@@ -1236,12 +1218,13 @@ function Test-GlobalAdminRole {
     )
     
     try {
-        $gaRoleId = (Get-MgBetaRoleManagementDirectoryRoleDefinition -Filter "displayName eq 'Global Administrator'").Id
+        $gaRoleId = (Get-MgBetaDirectoryRole -Filter "displayName eq 'Global Administrator'" -ErrorAction SilentlyContinue).Id
         $allHaveRole = $true
         
         foreach ($account in $Accounts) {
-            $assignments = Get-MgBetaRoleManagementDirectoryRoleAssignment -Filter "principalId eq '$($account.Id)' and roleDefinitionId eq '$gaRoleId'" -ErrorAction SilentlyContinue
-            if (-not $assignments -or $assignments.Count -eq 0) {
+            $members = Get-MgBetaDirectoryRoleMember -DirectoryRoleId $gaRoleId -ErrorAction SilentlyContinue
+            $isMember = $members | Where-Object { $_.Id -eq $account.Id }
+            if (-not $isMember) {
                 $allHaveRole = $false
                 break
             }
