@@ -479,7 +479,8 @@ try {
         "User.Read.All",
         "Directory.Read.All",
         "UserAuthenticationMethod.Read.All",
-        "AuditLog.Read.All"
+        "AuditLog.Read.All",
+        "Reports.Read.All"
     )
 
     # Check for existing Microsoft Graph connection
@@ -559,12 +560,70 @@ try {
     }
 
     # ========================================================================
-    # Known Room/Equipment license SKU IDs
+    # Detect account categories via Mailbox Usage Report (beta - has Recipient Type)
+    # ========================================================================
+    Write-Log "Retrieving mailbox types from usage report..." -Level "INFO"
+    $mailboxTypes = @{}  # UPN -> Recipient Type (User/Shared/Room/Equipment)
+    $reportPrivacyEnabled = $false
+    try {
+        $tempFile = [System.IO.Path]::GetTempFileName() + ".csv"
+        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/reports/getMailboxUsageDetail(period='D7')" -Method GET -OutputFilePath $tempFile -ErrorAction Stop
+        $reportData = Import-Csv $tempFile -ErrorAction Stop
+
+        # Check if UPNs are anonymized (privacy setting enabled)
+        $sampleUpn = ($reportData | Select-Object -First 1).'User Principal Name'
+        if ($sampleUpn -and $sampleUpn -match '^[A-F0-9]{32}$') {
+            $reportPrivacyEnabled = $true
+            Write-Log "Report privacy is enabled (concealed names). Mailbox type detection via report unavailable. Using heuristics." -Level "WARNING"
+        }
+        else {
+            foreach ($row in $reportData) {
+                if ($row.'User Principal Name' -and $row.'Recipient Type') {
+                    $mailboxTypes[$row.'User Principal Name'.ToLower()] = $row.'Recipient Type'
+                }
+            }
+            $typeSummary = $reportData | Group-Object 'Recipient Type' | ForEach-Object { "$($_.Name): $($_.Count)" }
+            Write-Log "Mailbox types retrieved: $($typeSummary -join ', ')" -Level "INFO"
+        }
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Log "Could not retrieve mailbox usage report: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
+        if ($tempFile -and (Test-Path $tempFile)) { Remove-Item $tempFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Also try Places API for room/equipment detection (requires Place.Read.All - optional)
+    $roomEmails = @{}
+    try {
+        $roomsResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/places/microsoft.graph.room" -Method GET -ErrorAction Stop
+        if ($roomsResponse.value) {
+            foreach ($room in $roomsResponse.value) {
+                if ($room.emailAddress) { $roomEmails[$room.emailAddress.ToLower()] = $true }
+            }
+        }
+        while ($roomsResponse.'@odata.nextLink') {
+            $roomsResponse = Invoke-MgGraphRequest -Uri $roomsResponse.'@odata.nextLink' -Method GET -ErrorAction Stop
+            if ($roomsResponse.value) {
+                foreach ($room in $roomsResponse.value) {
+                    if ($room.emailAddress) { $roomEmails[$room.emailAddress.ToLower()] = $true }
+                }
+            }
+        }
+        if ($roomEmails.Count -gt 0) {
+            Write-Log "Found $($roomEmails.Count) room resources via Places API" -Level "INFO"
+        }
+    }
+    catch {
+        # Place.Read.All may not be consented - this is optional
+    }
+
+    # ========================================================================
+    # Known Room/Equipment license SKU IDs (fallback detection)
     # ========================================================================
     $roomSkuIds = @(
-        "4b585984-651b-448a-9e53-3b10f069cf7f"  # MEETING_ROOM (Microsoft Teams Rooms Standard)
-        "6070a4c8-34c6-4937-8dfb-39a3b87bed76"  # MEETING_ROOM (Teams Rooms Pro)
-        "a]a2a47a-1b3e-4ac1-bc9e-0a7c7d5a7d7a"  # Common Area Phone
+        "4b585984-651b-448a-9e53-3b10f069cf7f"  # Microsoft Teams Rooms Standard
+        "6070a4c8-34c6-4937-8dfb-39a3b87bed76"  # Microsoft Teams Rooms Pro
+        "c25e2b36-e161-4946-bef2-69239729f690"  # Microsoft Teams Rooms Basic
     )
 
     # ========================================================================
@@ -583,21 +642,47 @@ try {
         # Determine account category
         $accountCategory = "User"
         $upnLower = $user.UserPrincipalName.ToLower()
-        if ($user.AssignedLicenses) {
+        $mailLower = if ($user.Mail) { $user.Mail.ToLower() } else { "" }
+        $displayLower = if ($user.DisplayName) { $user.DisplayName.ToLower() } else { "" }
+
+        # 1. Check mailbox usage report (works when report privacy is OFF)
+        if ($mailboxTypes.Count -gt 0 -and $mailboxTypes.ContainsKey($upnLower)) {
+            $mbType = $mailboxTypes[$upnLower]
+            switch ($mbType) {
+                "Shared"    { $accountCategory = "Shared Mailbox" }
+                "Room"      { $accountCategory = "Room" }
+                "Equipment" { $accountCategory = "Equipment" }
+                default     { $accountCategory = "User" }
+            }
+        }
+        # 2. Check Places API results (for rooms not in report)
+        elseif ($roomEmails.ContainsKey($upnLower) -or $roomEmails.ContainsKey($mailLower)) {
+            $accountCategory = "Room"
+        }
+        # 3. Check Room/Equipment license SKUs
+        elseif ($user.AssignedLicenses) {
             $userSkus = $user.AssignedLicenses | ForEach-Object { $_.SkuId }
             foreach ($sku in $roomSkuIds) {
                 if ($userSkus -contains $sku) { $accountCategory = "Room"; break }
             }
         }
-        # Heuristic detection for shared mailboxes and rooms
+        # 4. Heuristic fallback based on UPN and display name patterns
         if ($accountCategory -eq "User") {
-            if ($upnLower -match '^(room|meetingroom|conf|conference|board)[-_.]' -or $upnLower -match '[-_.]room@') {
+            # Room patterns
+            if ($upnLower -match '^(room|meetingroom|conf|conference|board|huddle|res[-_])' -or
+                $upnLower -match '[-_.](room|conf|meeting)@' -or
+                $displayLower -match '^(room|meeting room|conference|board room|huddle)') {
                 $accountCategory = "Room"
             }
-            elseif ($upnLower -match '^(shared|info|noreply|mailbox)[-_.]' -or $upnLower -match '[-_.]shared@') {
+            # Shared mailbox patterns
+            elseif ($upnLower -match '^(shared[-_.]|info@|noreply@|no-reply@|mailbox[-_.]|reception@|helpdesk@|support@|admin@|accounts@|hr@|finance@|sales@|marketing@)' -or
+                    $upnLower -match '[-_.]shared@' -or
+                    $displayLower -match '^(shared mailbox|shared -|info |noreply)') {
                 $accountCategory = "Shared Mailbox"
             }
-            elseif ($upnLower -match '^(equip|equipment|projector|av[-_])') {
+            # Equipment patterns
+            elseif ($upnLower -match '^(equip|equipment|projector|av[-_]|printer|display|kiosk|lobby)' -or
+                    $displayLower -match '^(equipment|projector|printer|display|kiosk)') {
                 $accountCategory = "Equipment"
             }
         }
@@ -801,6 +886,11 @@ try {
     Write-Host "`nACCOUNT CATEGORIES:" -ForegroundColor Yellow
     $export | Group-Object accountCategory | Sort-Object Count -Descending | ForEach-Object {
         Write-Host "  $($_.Name): $($_.Count)"
+    }
+    if ($reportPrivacyEnabled) {
+        Write-Host "  Note: Report privacy is enabled in this tenant. Account category detection" -ForegroundColor DarkGray
+        Write-Host "  relies on heuristics only. For accurate results, disable 'Conceal user details'" -ForegroundColor DarkGray
+        Write-Host "  in Microsoft 365 Admin > Settings > Org settings > Reports." -ForegroundColor DarkGray
     }
 
     Write-Host "`nADMIN ACCOUNTS:" -ForegroundColor Yellow
