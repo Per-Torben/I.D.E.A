@@ -55,10 +55,16 @@
     - UserAuthenticationMethod.Read.All
     - AuditLog.Read.All (for sign-in activity data)
     
+    Also requires Exchange Online connectivity (Connect-ExchangeOnline) for authoritative
+    mailbox-type detection (shared/room/equipment). The script will connect automatically
+    if no existing EXO session is found.
+    
     Author: Per-Torben Sørensen
-    Version: 2.0
+    Version: 2.1
     Created: October 2025
     Updated: June 2026 - Added HTML report, risk levels, account categories, sign-in activity
+                       - Replaced usage-report mailbox detection with Exchange Online RecipientTypeDetails
+                       - Edge now opens report in normal window instead of guest mode
 #>
 
 [CmdletBinding()]
@@ -86,7 +92,8 @@ $requiredModules = @(
     'Microsoft.Graph.Authentication',
     'Microsoft.Graph.Users',
     'Microsoft.Graph.Beta.Identity.SignIns',
-    'Microsoft.Graph.Identity.DirectoryManagement'
+    'Microsoft.Graph.Identity.DirectoryManagement',
+    'ExchangeOnlineManagement'
 )
 
 foreach ($module in $requiredModules) {
@@ -560,36 +567,30 @@ try {
     }
 
     # ========================================================================
-    # Detect account categories via Mailbox Usage Report (beta - has Recipient Type)
+    # Detect account categories via Exchange Online RecipientTypeDetails
     # ========================================================================
-    Write-Log "Retrieving mailbox types from usage report..." -Level "INFO"
-    $mailboxTypes = @{}  # UPN -> Recipient Type (User/Shared/Room/Equipment)
-    $reportPrivacyEnabled = $false
+    Write-Log "Retrieving mailbox types from Exchange Online..." -Level "INFO"
+    $mailboxTypes = @{}  # UPN -> RecipientTypeDetails
+    $exoConnected = $false
     try {
-        $tempFile = [System.IO.Path]::GetTempFileName() + ".csv"
-        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/reports/getMailboxUsageDetail(period='D7')" -Method GET -OutputFilePath $tempFile -ErrorAction Stop
-        $reportData = Import-Csv $tempFile -ErrorAction Stop
+        $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
+        if (-not $exoSession) {
+            Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            $exoConnected = $true
+        }
 
-        # Check if UPNs are anonymized (privacy setting enabled)
-        $sampleUpn = ($reportData | Select-Object -First 1).'User Principal Name'
-        if ($sampleUpn -and $sampleUpn -match '^[A-F0-9]{32}$') {
-            $reportPrivacyEnabled = $true
-            Write-Log "Report privacy is enabled (concealed names). Mailbox type detection via report unavailable. Using heuristics." -Level "WARNING"
-        }
-        else {
-            foreach ($row in $reportData) {
-                if ($row.'User Principal Name' -and $row.'Recipient Type') {
-                    $mailboxTypes[$row.'User Principal Name'.ToLower()] = $row.'Recipient Type'
-                }
+        $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop
+        foreach ($mbx in $mailboxes) {
+            if ($mbx.UserPrincipalName) {
+                $mailboxTypes[$mbx.UserPrincipalName.ToLower()] = $mbx.RecipientTypeDetails
             }
-            $typeSummary = $reportData | Group-Object 'Recipient Type' | ForEach-Object { "$($_.Name): $($_.Count)" }
-            Write-Log "Mailbox types retrieved: $($typeSummary -join ', ')" -Level "INFO"
         }
-        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+
+        $typeSummary = $mailboxes | Group-Object RecipientTypeDetails | ForEach-Object { "$($_.Name): $($_.Count)" }
+        Write-Log "Mailbox types retrieved: $($typeSummary -join ', ')" -Level "INFO"
     }
     catch {
-        Write-Log "Could not retrieve mailbox usage report: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
-        if ($tempFile -and (Test-Path $tempFile)) { Remove-Item $tempFile -Force -ErrorAction SilentlyContinue }
+        Write-Log "Could not retrieve mailbox types from Exchange Online: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
     }
 
     # Also try Places API for room/equipment detection (requires Place.Read.All - optional)
@@ -646,14 +647,15 @@ try {
         $mailLower = if ($user.Mail) { $user.Mail.ToLower() } else { "" }
         $displayLower = if ($user.DisplayName) { $user.DisplayName.ToLower() } else { "" }
 
-        # 1. Check mailbox usage report (works when report privacy is OFF)
+        # 1. Check Exchange Online RecipientTypeDetails
         if ($mailboxTypes.Count -gt 0 -and $mailboxTypes.ContainsKey($upnLower)) {
             $mbType = $mailboxTypes[$upnLower]
             switch ($mbType) {
-                "Shared"    { $accountCategory = "Shared Mailbox" }
-                "Room"      { $accountCategory = "Room" }
-                "Equipment" { $accountCategory = "Equipment" }
-                default     { $accountCategory = "User" }
+                "SharedMailbox"    { $accountCategory = "Shared Mailbox" }
+                "RoomMailbox"      { $accountCategory = "Room" }
+                "EquipmentMailbox" { $accountCategory = "Equipment" }
+                "UserMailbox"      { $accountCategory = "User" }
+                default            { $accountCategory = "User" }
             }
         }
         # 2. Check Places API results (for rooms not in report)
@@ -890,19 +892,55 @@ try {
     $mfaUnknown = ($export | Where-Object { $_.MFAstatus -eq "unknown" }).Count
     $appPasswordUsers = ($export | Where-Object { $_.appPassword -eq $true }).Count
 
+    # Segment by type
+    $memberAccounts = $export | Where-Object { $_.usertype -eq 'Member' -and -not $_.isAdmin }
+    $guestAccounts = $export | Where-Object { $_.usertype -eq 'Guest' }
+    $adminAccounts = $export | Where-Object { $_.isAdmin }
+
     Write-Host ("=" * 80) -ForegroundColor Green
     Write-Host "Entra ID MFA Report - Generated: $date" -ForegroundColor Green
     Write-Host ("=" * 80) -ForegroundColor Green
 
-    Write-Host "`nOVERALL STATISTICS:" -ForegroundColor Yellow
-    Write-Host "Total Users: $totalUsers"
-    Write-Host "Enabled Accounts: $enabledAccounts ($([math]::Round(($enabledAccounts / $totalUsers) * 100, 1))%)"
-    Write-Host "MFA Enabled: $mfaEnabled ($([math]::Round(($mfaEnabled / $totalUsers) * 100, 1))%)" -ForegroundColor Green
-    Write-Host "MFA Disabled: $mfaDisabled ($([math]::Round(($mfaDisabled / $totalUsers) * 100, 1))%)" -ForegroundColor Red
-    if ($mfaUnknown -gt 0) {
-        Write-Host "MFA Unknown: $mfaUnknown ($([math]::Round(($mfaUnknown / $totalUsers) * 100, 1))%)" -ForegroundColor Yellow
-    }
+    # --- USERS (Members, non-admin) ---
+    Write-Host "`nUSERS (Members, non-admin):" -ForegroundColor Yellow
+    $mEnabled = ($memberAccounts | Where-Object { $_.enabled }).Count
+    $mMfaOn = ($memberAccounts | Where-Object { $_.MFAstatus -eq "enabled" }).Count
+    $mMfaOffEnabled = ($memberAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and $_.enabled }).Count
+    $mMfaOffDisabled = ($memberAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and -not $_.enabled }).Count
+    $mTotal = $memberAccounts.Count
+    Write-Host "  Total: $mTotal"
+    Write-Host "  Accounts Enabled: $mEnabled" -ForegroundColor White
+    Write-Host "  MFA Enabled: $mMfaOn" -ForegroundColor Green
+    Write-Host "  MFA Disabled (account enabled): $mMfaOffEnabled" -ForegroundColor Red
+    Write-Host "  MFA Disabled (account disabled): $mMfaOffDisabled" -ForegroundColor Gray
 
+    # --- GUEST ACCOUNTS ---
+    Write-Host "`nGUEST ACCOUNTS:" -ForegroundColor Yellow
+    $gEnabled = ($guestAccounts | Where-Object { $_.enabled }).Count
+    $gMfaOn = ($guestAccounts | Where-Object { $_.MFAstatus -eq "enabled" }).Count
+    $gMfaOffEnabled = ($guestAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and $_.enabled }).Count
+    $gMfaOffDisabled = ($guestAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and -not $_.enabled }).Count
+    $gTotal = $guestAccounts.Count
+    Write-Host "  Total: $gTotal"
+    Write-Host "  Accounts Enabled: $gEnabled" -ForegroundColor White
+    Write-Host "  MFA Enabled: $gMfaOn" -ForegroundColor Green
+    Write-Host "  MFA Disabled (account enabled): $gMfaOffEnabled" -ForegroundColor Red
+    Write-Host "  MFA Disabled (account disabled): $gMfaOffDisabled" -ForegroundColor Gray
+
+    # --- ADMIN ACCOUNTS ---
+    Write-Host "`nADMIN ACCOUNTS:" -ForegroundColor Yellow
+    $aEnabled = ($adminAccounts | Where-Object { $_.enabled }).Count
+    $aMfaOn = ($adminAccounts | Where-Object { $_.MFAstatus -eq "enabled" }).Count
+    $aMfaOffEnabled = ($adminAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and $_.enabled }).Count
+    $aMfaOffDisabled = ($adminAccounts | Where-Object { $_.MFAstatus -eq "disabled" -and -not $_.enabled }).Count
+    $aTotal = $adminAccounts.Count
+    Write-Host "  Total: $aTotal"
+    Write-Host "  Accounts Enabled: $aEnabled" -ForegroundColor White
+    Write-Host "  MFA Enabled: $aMfaOn" -ForegroundColor Green
+    Write-Host "  MFA Disabled (account enabled): $aMfaOffEnabled" -ForegroundColor Red
+    Write-Host "  MFA Disabled (account disabled): $aMfaOffDisabled" -ForegroundColor Gray
+
+    # --- RISK SUMMARY (all accounts) ---
     Write-Host "`nRISK SUMMARY:" -ForegroundColor Yellow
     $riskCritical = ($export | Where-Object { $_.RiskLevel -eq "Critical" }).Count
     $riskHigh = ($export | Where-Object { $_.RiskLevel -eq "High" }).Count
@@ -915,34 +953,26 @@ try {
     Write-Host "  Low (Phishing-resistant): $riskLow" -ForegroundColor Green
     Write-Host "  N/A (Disabled/Blocked): $riskNA" -ForegroundColor Gray
 
-    Write-Host "`nACCOUNT CATEGORIES:" -ForegroundColor Yellow
-    $export | Group-Object accountCategory | Sort-Object Count -Descending | ForEach-Object {
-        Write-Host "  $($_.Name): $($_.Count)"
-    }
-    if ($reportPrivacyEnabled) {
-        Write-Host "  Note: Report privacy is enabled in this tenant. Account category detection" -ForegroundColor DarkGray
-        Write-Host "  relies on heuristics only. For accurate results, disable 'Conceal user details'" -ForegroundColor DarkGray
-        Write-Host "  in Microsoft 365 Admin > Settings > Org settings > Reports." -ForegroundColor DarkGray
-    }
-
-    Write-Host "`nADMIN ACCOUNTS:" -ForegroundColor Yellow
-    $adminAccounts = $export | Where-Object { $_.isAdmin }
-    $adminNoMFA = $adminAccounts | Where-Object { $_.MFAstatus -eq "disabled" }
-    Write-Host "  Total Admins: $($adminAccounts.Count)"
-    if ($adminNoMFA.Count -gt 0) {
-        Write-Host "  Admins WITHOUT MFA: $($adminNoMFA.Count)" -ForegroundColor Red
-    }
-
+    # --- MFA METHODS ---
     Write-Host "`nMFA METHODS (users with MFA enabled):" -ForegroundColor Yellow
     $mfaUsers = $export | Where-Object { $_.MFAstatus -eq "enabled" }
     if ($mfaUsers.Count -gt 0) {
         $mc = $mfaUsers.Count
-        Write-Host "  Authenticator App: $(($mfaUsers | Where-Object { $_.authApp }).Count) ($([math]::Round((($mfaUsers | Where-Object { $_.authApp }).Count / $mc) * 100, 1))%)"
-        Write-Host "  Phone/SMS: $(($mfaUsers | Where-Object { $_.phoneSMS }).Count) ($([math]::Round((($mfaUsers | Where-Object { $_.phoneSMS }).Count / $mc) * 100, 1))%)"
-        Write-Host "  FIDO2: $(($mfaUsers | Where-Object { $_.fido }).Count) ($([math]::Round((($mfaUsers | Where-Object { $_.fido }).Count / $mc) * 100, 1))%)"
-        Write-Host "  Windows Hello: $(($mfaUsers | Where-Object { $_.helloForBusiness }).Count) ($([math]::Round((($mfaUsers | Where-Object { $_.helloForBusiness }).Count / $mc) * 100, 1))%)"
-        Write-Host "  Passwordless: $(($mfaUsers | Where-Object { $_.passwordLess }).Count)"
-        Write-Host "  Software OATH: $(($mfaUsers | Where-Object { $_.softwareAuth }).Count)"
+        $methodStats = @(
+            @{ Name = 'Authenticator App'; Count = ($mfaUsers | Where-Object { $_.authApp }).Count },
+            @{ Name = 'Phone/SMS'; Count = ($mfaUsers | Where-Object { $_.phoneSMS }).Count },
+            @{ Name = 'FIDO2'; Count = ($mfaUsers | Where-Object { $_.fido }).Count },
+            @{ Name = 'Windows Hello'; Count = ($mfaUsers | Where-Object { $_.helloForBusiness }).Count },
+            @{ Name = 'Passwordless'; Count = ($mfaUsers | Where-Object { $_.passwordLess }).Count },
+            @{ Name = 'Software OATH'; Count = ($mfaUsers | Where-Object { $_.softwareAuth }).Count },
+            @{ Name = 'Email'; Count = ($mfaUsers | Where-Object { $_.emailAuth }).Count },
+            @{ Name = 'TAP'; Count = ($mfaUsers | Where-Object { $_.tempPass }).Count }
+        ) | Sort-Object { $_.Count } -Descending | Where-Object { $_.Count -gt 0 }
+
+        foreach ($method in $methodStats) {
+            $pct = [math]::Round(($method.Count / $mc) * 100, 1)
+            Write-Host "  $($method.Name): $($method.Count) ($pct%)"
+        }
     }
 
     Write-Host ("=" * 80) -ForegroundColor Green
@@ -965,7 +995,7 @@ try {
         RiskLow                 = $riskLow
         RiskNA                  = $riskNA
         AdminCount              = $adminAccounts.Count
-        AdminsWithoutMFA        = $adminNoMFA.Count
+        AdminsWithoutMFA        = $aMfaOffEnabled
         AppPasswordUsers        = $appPasswordUsers
     }
 
@@ -1012,7 +1042,26 @@ try {
         $htmlFilename = Join-Path $ExportDirectory "MFAReport-${safetenantName}-$(Get-Date -Format 'yyyyMMdd-HHmmss').html"
 
         New-HtmlReport -UserData $export -Summary $enhancedReport -OutputPath $htmlFilename -TenantName $tenantName
-        Write-Host "HTML report exported: $htmlFilename" -ForegroundColor Green
+
+        # Open report in Edge
+        $htmlFullPath = (Resolve-Path $htmlFilename).Path
+        $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        if (-not (Test-Path $edgePath)) {
+            $edgePath = "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        }
+        if (Test-Path $edgePath) {
+            $fileUri = ([System.Uri]$htmlFullPath).AbsoluteUri
+            Start-Process -FilePath $edgePath -ArgumentList "--new-window", $fileUri
+            Write-Log "Report opened in Edge: $fileUri" -Level "INFO"
+        }
+        else {
+            Write-Log "Edge not found. Open manually: $htmlFullPath" -Level "WARNING"
+        }
+
+        Write-Host ""
+        Write-Host ("=" * 80) -ForegroundColor Green
+        Write-Host "HTML REPORT: $htmlFullPath" -ForegroundColor Cyan
+        Write-Host ("=" * 80) -ForegroundColor Green
     }
 
     # ========================================================================
@@ -1038,6 +1087,11 @@ try {
                 CAErrors         = $caErrorCount
             }
         }
+    }
+
+    # Disconnect Exchange Online if we connected it
+    if ($exoConnected) {
+        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     Write-Log "MFA Report generation completed successfully" -Level "SUCCESS"
