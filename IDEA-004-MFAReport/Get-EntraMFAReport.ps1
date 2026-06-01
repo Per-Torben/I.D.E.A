@@ -633,6 +633,7 @@ try {
     $psstyle.progress.view = "Classic"
     $errorCount = 0
     $caErrorCount = 0
+    $rmauCount = 0
 
     foreach ($user in $allusers) {
         $i++
@@ -804,7 +805,38 @@ try {
         }
         catch {
             $errorCount++
-            if ($_.Exception.Message -match "LocationConditionEvaluationSatisfied|InvalidAuthenticationToken|Continuous access evaluation") {
+            if ($_.Exception.Message -match "accessDenied") {
+                # Restricted Management AU - cannot read auth methods
+                $rmauCount++
+                $output = [PSCustomObject]@{
+                    user              = $user.DisplayName
+                    upn               = $user.UserPrincipalName
+                    usertype          = $user.UserType
+                    accountCategory   = $accountCategory
+                    enabled           = $user.AccountEnabled
+                    MFAstatus         = "unknown"
+                    authApp           = $false
+                    phoneSMS          = $false
+                    fido              = $false
+                    helloForBusiness  = $false
+                    emailAuth         = $false
+                    tempPass          = $false
+                    passwordLess      = $false
+                    softwareAuth      = $false
+                    appPassword       = $false
+                    authDevice        = "RMAU Protected"
+                    authPhoneNr       = $false
+                    phoneNumber       = $false
+                    SSPREmail         = $false
+                    isAdmin           = $isAdmin
+                    licensed          = $isLicensed
+                    lastSignIn        = $lastSignIn
+                    RiskLevel         = "N/A"
+                    RiskNotes         = "Restricted Management AU (access denied)"
+                }
+                $export.Add($output) | Out-Null
+            }
+            elseif ($_.Exception.Message -match "LocationConditionEvaluationSatisfied|InvalidAuthenticationToken|Continuous access evaluation") {
                 $caErrorCount++
                 $output = [PSCustomObject]@{
                     user              = $user.DisplayName
@@ -844,7 +876,7 @@ try {
     Write-Log "User analysis completed. Processed $($export.Count) users." -Level "SUCCESS"
 
     if ($errorCount -gt 0) {
-        Write-Log "Processing completed with $errorCount errors (CA blocked: $caErrorCount)" -Level "WARNING"
+        Write-Log "Processing completed with $errorCount errors (RMAU protected: $rmauCount, CA blocked: $caErrorCount)" -Level "WARNING"
     }
 
     # ========================================================================
