@@ -542,15 +542,6 @@ try {
     Write-Log "Retrieving directory role assignments..." -Level "INFO"
     $adminUserIds = @{}
     try {
-        $roleAssignments = Get-MgDirectoryRoleMember -All -ErrorAction SilentlyContinue
-    }
-    catch {
-        Write-Log "Could not retrieve role members via Get-MgDirectoryRoleMember, trying alternative..." -Level "WARNING"
-        $roleAssignments = $null
-    }
-
-    # Alternative: get all active directory roles and their members
-    try {
         $directoryRoles = Get-MgDirectoryRole -All -ErrorAction Stop
         foreach ($role in $directoryRoles) {
             try {
