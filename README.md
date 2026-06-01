@@ -80,6 +80,26 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 
 ---
 
+### [I.D.E.A. 004 – Comprehensive MFA Report](IDEA-004-MFAReport/)
+Generates a detailed Multi-Factor Authentication status report for all accounts in a Microsoft Entra ID tenant, with interactive HTML output for sorting, filtering, and risk analysis.
+
+**Key Capabilities**
+- Analyzes MFA status and authentication methods for every user in the tenant
+- Detects all MFA methods: Authenticator, Phone/SMS, FIDO2, Windows Hello, Passwordless, Software OATH, Email, TAP
+- Classifies accounts by category: User, Room, Shared Mailbox, Equipment
+- Risk level scoring: Critical (no MFA) → High (SMS-only) → Medium (no phishing-resistant) → Low (FIDO2/Hello)
+- Admin role detection, license status, and last sign-in activity
+- Self-contained interactive HTML report — works offline, no external dependencies
+- HTML features: column sorting, dropdown filters, text search, MFA method chip filters
+- CSV export (detailed user data + summary statistics)
+- Console summary with risk breakdown and method distribution
+
+**Use Case:** Provides security teams and administrators a comprehensive view of MFA adoption across the tenant, enabling them to identify high-risk accounts, prioritize remediation, and track MFA rollout progress. The HTML report enables non-technical stakeholders to explore data independently.
+
+📖 **[Full Documentation](IDEA-004-MFAReport/README.md)**
+
+---
+
 ## Getting Started
 1. Browse the I.D.E.A. folders above  
 2. Read the specific README.md for prerequisites and usage  
