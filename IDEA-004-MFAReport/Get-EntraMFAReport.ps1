@@ -1,55 +1,34 @@
 <#
 .SYNOPSIS
-    Generates a comprehensive MFA report for Microsoft Entra ID users with interactive HTML output.
+    Interactive menu-driven MFA report for Microsoft Entra ID with HTML output.
 
 .DESCRIPTION
+    Provides an interactive menu experience for generating comprehensive MFA reports.
     Analyzes MFA status for all users in the tenant using Microsoft Graph Beta API.
-    Provides detailed statistics about MFA adoption, authentication methods, risk levels,
-    account categories (user/room/shared/equipment), admin status, licensing, and sign-in activity.
     
-    Outputs include:
-    - Console summary with statistics and risk analysis
-    - CSV export (detailed user data + summary statistics)
+    Features:
+    - Interactive menu for connecting to services and generating reports
+    - Microsoft Graph connection (required) and Exchange Online (optional)
+    - Selectable output formats: Console, HTML, CSV, or any combination
+    - Risk assessment with 5 levels (Critical/High/Medium/Good/Secure)
+    - Phone number country distribution analysis
     - Self-contained interactive HTML report with sorting, filtering, and search
-    
-    PREREQUISITE: An active Microsoft Graph connection with the required scopes must already exist.
-    If not connected, the script will display the required connection command and exit.
-
-.PARAMETER ExportToCsv
-    Exports detailed user data and summary statistics to CSV files in the exports/ directory.
-
-.PARAMETER ExportToHtml
-    Generates a self-contained interactive HTML report with sorting, filtering, and search.
-    The HTML file works offline with no external dependencies.
-
-.PARAMETER ExportAll
-    Exports both CSV and HTML reports.
-
-.PARAMETER ReturnData
-    Returns data objects instead of displaying the report. Useful for piping to other commands.
+    - Account category detection (user/room/shared/equipment)
+    - Admin status, licensing, and sign-in activity tracking
 
 .PARAMETER LogDirectory
     Directory path for log files. Defaults to .\Logs
 
 .EXAMPLE
-    Connect-MgGraph -Scopes "User.Read.All","Directory.Read.All","UserAuthenticationMethod.Read.All","AuditLog.Read.All" -NoWelcome
     .\Get-EntraMFAReport.ps1
-    Connect to Microsoft Graph with required scopes, then run the report (console output only).
+    Launches the interactive menu to connect to services and generate the MFA report.
 
 .EXAMPLE
-    .\Get-EntraMFAReport.ps1 -ExportToHtml
-    Generates the interactive HTML report.
-
-.EXAMPLE
-    .\Get-EntraMFAReport.ps1 -ExportAll
-    Exports both CSV files and the HTML report.
-
-.EXAMPLE
-    $results = .\Get-EntraMFAReport.ps1 -ReturnData
-    Stores results in a variable. Access with $results.Users, $results.Summary, $results.Statistics
+    .\Get-EntraMFAReport.ps1 -LogDirectory "C:\Logs"
+    Launches with a custom log directory.
 
 .NOTES
-    Requires an existing Microsoft Graph connection with these scopes:
+    Requires a Microsoft Graph connection with these scopes:
     - User.Read.All
     - Directory.Read.All
     - UserAuthenticationMethod.Read.All
@@ -58,6 +37,14 @@
     Also requires Exchange Online connectivity (Connect-ExchangeOnline) for authoritative
     mailbox-type detection (shared/room/equipment). The script will connect automatically
     if no existing EXO session is found.
+
+    TROUBLESHOOTING:
+    If the report fails with permission errors, run Connect-MgGraph manually with the
+    required scopes and check whether admin consent is missing:
+        Connect-MgGraph -Scopes "User.Read.All","Directory.Read.All","UserAuthenticationMethod.Read.All","AuditLog.Read.All"
+    If the consent prompt does not show "Consent on behalf of your organization", a
+    Global Admin must grant admin consent via the Entra admin center:
+        Enterprise Applications > Microsoft Graph Command Line Tools > Permissions > Grant admin consent
     
     Author: Per-Torben Sørensen
     Version: 2.1
@@ -65,22 +52,19 @@
     Updated: June 2026 - Added HTML report, risk levels, account categories, sign-in activity
                        - Replaced usage-report mailbox detection with Exchange Online RecipientTypeDetails
                        - Edge now opens report in normal window instead of guest mode
+
+    DATA PRIVACY / GDPR NOTICE:
+    Output files (HTML and CSV) contain personal data including names, email addresses,
+    phone numbers, and sign-in activity. Handle in accordance with your organisation's
+    data protection policy and applicable regulations (e.g. GDPR, CCPA).
+    - Store in a secure, access-controlled location
+    - Do not distribute beyond authorised recipients
+    - Retain only as long as operationally required
+    - Dispose of securely when no longer needed
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [switch]$ExportToCsv,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$ExportToHtml,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$ExportAll,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$ReturnData,
-
     [Parameter(Mandatory = $false)]
     [string]$LogDirectory = ".\Logs"
 )
@@ -136,11 +120,226 @@ function Write-Log {
 }
 
 # ============================================================================
-# Handle ExportAll flag
+# Phone Country Code Mapping
 # ============================================================================
-if ($ExportAll) {
-    $ExportToCsv = $true
-    $ExportToHtml = $true
+$CountryCodes = @{
+    '1'='US/Canada'; '7'='Russia'; '20'='Egypt'; '27'='South Africa'; '30'='Greece';
+    '31'='Netherlands'; '32'='Belgium'; '33'='France'; '34'='Spain'; '36'='Hungary';
+    '39'='Italy'; '40'='Romania'; '41'='Switzerland'; '43'='Austria'; '44'='UK';
+    '45'='Denmark'; '46'='Sweden'; '47'='Norway'; '48'='Poland'; '49'='Germany';
+    '51'='Peru'; '52'='Mexico'; '53'='Cuba'; '54'='Argentina'; '55'='Brazil';
+    '56'='Chile'; '57'='Colombia'; '58'='Venezuela'; '60'='Malaysia'; '61'='Australia';
+    '62'='Indonesia'; '63'='Philippines'; '64'='New Zealand'; '65'='Singapore';
+    '66'='Thailand'; '81'='Japan'; '82'='South Korea'; '84'='Vietnam'; '86'='China';
+    '90'='Turkey'; '91'='India'; '92'='Pakistan'; '93'='Afghanistan'; '94'='Sri Lanka';
+    '95'='Myanmar'; '98'='Iran'; '211'='South Sudan'; '212'='Morocco'; '213'='Algeria';
+    '216'='Tunisia'; '218'='Libya'; '220'='Gambia'; '221'='Senegal'; '222'='Mauritania';
+    '223'='Mali'; '224'='Guinea'; '225'='Ivory Coast'; '226'='Burkina Faso';
+    '227'='Niger'; '228'='Togo'; '229'='Benin'; '230'='Mauritius'; '231'='Liberia';
+    '232'='Sierra Leone'; '233'='Ghana'; '234'='Nigeria'; '235'='Chad'; '236'='CAR';
+    '237'='Cameroon'; '238'='Cape Verde'; '239'='Sao Tome'; '240'='Eq. Guinea';
+    '241'='Gabon'; '242'='Congo'; '243'='DRC'; '244'='Angola'; '245'='Guinea-Bissau';
+    '248'='Seychelles'; '249'='Sudan'; '250'='Rwanda'; '251'='Ethiopia'; '252'='Somalia';
+    '253'='Djibouti'; '254'='Kenya'; '255'='Tanzania'; '256'='Uganda'; '257'='Burundi';
+    '258'='Mozambique'; '260'='Zambia'; '261'='Madagascar'; '262'='Reunion';
+    '263'='Zimbabwe'; '264'='Namibia'; '265'='Malawi'; '266'='Lesotho';
+    '267'='Botswana'; '268'='Eswatini'; '269'='Comoros'; '290'='St Helena';
+    '291'='Eritrea'; '297'='Aruba'; '298'='Faroe Islands'; '299'='Greenland';
+    '350'='Gibraltar'; '351'='Portugal'; '352'='Luxembourg'; '353'='Ireland';
+    '354'='Iceland'; '355'='Albania'; '356'='Malta'; '357'='Cyprus'; '358'='Finland';
+    '359'='Bulgaria'; '370'='Lithuania'; '371'='Latvia'; '372'='Estonia';
+    '373'='Moldova'; '374'='Armenia'; '375'='Belarus'; '376'='Andorra';
+    '377'='Monaco'; '378'='San Marino'; '380'='Ukraine'; '381'='Serbia';
+    '382'='Montenegro'; '383'='Kosovo'; '385'='Croatia'; '386'='Slovenia';
+    '387'='Bosnia'; '389'='North Macedonia'; '420'='Czech Republic'; '421'='Slovakia';
+    '423'='Liechtenstein'; '852'='Hong Kong'; '853'='Macau'; '855'='Cambodia';
+    '856'='Laos'; '880'='Bangladesh'; '886'='Taiwan'; '960'='Maldives';
+    '961'='Lebanon'; '962'='Jordan'; '963'='Syria'; '964'='Iraq'; '965'='Kuwait';
+    '966'='Saudi Arabia'; '967'='Yemen'; '968'='Oman'; '970'='Palestine';
+    '971'='UAE'; '972'='Israel'; '973'='Bahrain'; '974'='Qatar'; '975'='Bhutan';
+    '976'='Mongolia'; '977'='Nepal'; '992'='Tajikistan'; '993'='Turkmenistan';
+    '994'='Azerbaijan'; '995'='Georgia'; '996'='Kyrgyzstan'; '998'='Uzbekistan'
+}
+
+function Get-CountryFromPhone {
+    param([string]$PhoneNumber)
+    if (-not $PhoneNumber -or $PhoneNumber -eq 'False') { return $null }
+    $cleaned = $PhoneNumber -replace '[^\d+]', ''
+    if ($cleaned -notmatch '^\+') { return 'Unknown' }
+    $digits = $cleaned.TrimStart('+')
+    # Try 3-digit, then 2-digit, then 1-digit country codes
+    for ($len = 3; $len -ge 1; $len--) {
+        if ($digits.Length -ge $len) {
+            $code = $digits.Substring(0, $len)
+            if ($CountryCodes.ContainsKey($code)) { return "$($CountryCodes[$code]) (+$code)" }
+        }
+    }
+    return "Unknown (+$($digits.Substring(0, [Math]::Min(3, $digits.Length)))...)"
+}
+
+# ============================================================================
+# Menu Functions
+# ============================================================================
+function Show-Banner {
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host "  I.D.E.A. 004 - Entra ID MFA Report" -ForegroundColor Cyan
+    Write-Host "  Identity Engineering Artifacts" -ForegroundColor DarkCyan
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Show-ConnectionStatus {
+    $graphStatus = "Not connected"
+    $graphColor = "Red"
+    $exoStatus = "Not connected"
+    $exoColor = "Red"
+
+    $ctx = Get-MgContext -ErrorAction SilentlyContinue
+    if ($ctx) {
+        # Prefer the *.onmicrosoft.com initial domain over the raw tenant GUID
+        try {
+            $initialDomain = (Get-MgDomain -ErrorAction SilentlyContinue |
+                Where-Object { $_.IsInitial -eq $true } |
+                Select-Object -First 1).Id
+        } catch { $initialDomain = $null }
+        $domainLabel = if ($initialDomain) { $initialDomain } else { $ctx.TenantId }
+        $graphStatus = "Connected ($domainLabel)"
+        $graphColor = "Green"
+    }
+
+    $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
+    if ($exoSession) {
+        # Show the default accepted domain (e.g. contoso.com) when available
+        try {
+            $defaultDomain = (Get-AcceptedDomain -ErrorAction SilentlyContinue |
+                Where-Object { $_.Default -eq $true } |
+                Select-Object -First 1).DomainName
+        } catch { $defaultDomain = $null }
+        $exoStatus = if ($defaultDomain) { "Connected ($defaultDomain)" } else { "Connected" }
+        $exoColor = "Green"
+    }
+
+    Write-Host "  Connection Status:" -ForegroundColor Yellow
+    Write-Host "    Microsoft Graph:    " -NoNewline; Write-Host $graphStatus -ForegroundColor $graphColor
+    Write-Host "    Exchange Online:    " -NoNewline; Write-Host $exoStatus -ForegroundColor $exoColor
+    Write-Host ""
+}
+
+function Show-StaleFilesWarning {
+    $cutoff = (Get-Date).AddHours(-24)
+    $dirs = @(".\exports", $LogDirectory) | Where-Object { Test-Path $_ }
+
+    $staleFiles = foreach ($dir in $dirs) {
+        Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoff }
+    }
+
+    if ($staleFiles) {
+        $count = @($staleFiles).Count
+        $paths = ($dirs | ForEach-Object { (Resolve-Path $_ -ErrorAction SilentlyContinue).Path }) -join ', '
+        Write-Host ("  " + "-" * 74) -ForegroundColor DarkYellow
+        Write-Host "  ! $count file(s) older than 24 hours found in: $paths" -ForegroundColor Yellow
+        Write-Host "    These may contain personal data. Delete them if no longer needed." -ForegroundColor Yellow
+        Write-Host ("  " + "-" * 74) -ForegroundColor DarkYellow
+        Write-Host ""
+    }
+}
+
+function Show-MainMenu {
+    Clear-Host
+    Show-Banner
+    Show-ConnectionStatus
+    Show-StaleFilesWarning
+    Write-Host "  [1] Connect to Microsoft Graph" -ForegroundColor Green
+    Write-Host "  [2] Connect to Exchange Online (optional)" -ForegroundColor Green
+    Write-Host "  [3] Generate MFA Report" -ForegroundColor Green
+    Write-Host "  [Q] Quit" -ForegroundColor Gray
+    Write-Host ""
+}
+
+function Show-OutputMenu {
+    Write-Host ""
+    Write-Host "  Select output format(s):" -ForegroundColor Yellow
+    Write-Host "  [1] Console + HTML report (default)" -ForegroundColor Green
+    Write-Host "  [2] Console + HTML + CSV" -ForegroundColor Green
+    Write-Host "  [3] Console only" -ForegroundColor Green
+    Write-Host "  [4] CSV only (no HTML)" -ForegroundColor Green
+    Write-Host ""
+    
+    $choice = Read-Host "  Enter choice (1-4, default=1)"
+    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+    
+    switch ($choice) {
+        '1' { return @{ Html = $true; Csv = $false; Console = $true } }
+        '2' { return @{ Html = $true; Csv = $true; Console = $true } }
+        '3' { return @{ Html = $false; Csv = $false; Console = $true } }
+        '4' { return @{ Html = $false; Csv = $true; Console = $true } }
+        default { 
+            Write-Host "  Invalid choice, using default (Console + HTML)" -ForegroundColor Yellow
+            return @{ Html = $true; Csv = $false; Console = $true }
+        }
+    }
+}
+
+function Connect-Graph {
+    $requiredScopes = @(
+        "User.Read.All",
+        "Directory.Read.All",
+        "UserAuthenticationMethod.Read.All",
+        "AuditLog.Read.All",
+        "Reports.Read.All"
+    )
+
+    Write-Host ""
+    Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Yellow
+    Write-Host "  Required scopes: $($requiredScopes -join ', ')" -ForegroundColor Gray
+    Write-Host ""
+
+    try {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+        Connect-MgGraph -Scopes $requiredScopes -NoWelcome -ContextScope Process -ErrorAction Stop
+        $ctx = Get-MgContext
+        if ($ctx) {
+            Write-Host "  ✓ Connected (Tenant: $($ctx.TenantId))" -ForegroundColor Green
+            Write-Log "Connected to Microsoft Graph (Tenant: $($ctx.TenantId))" -Level "SUCCESS"
+        }
+        else {
+            Write-Host "  ✗ Connection failed - no context established" -ForegroundColor Red
+        }
+    }
+    catch {
+        Write-Host "  ✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "Graph connection failed: $($_.Exception.Message)" -Level "ERROR"
+    }
+}
+
+function Connect-Exo {
+    Write-Host ""
+    Write-Host "  ┌─────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  Exchange Online is OPTIONAL.                                    │" -ForegroundColor Yellow
+    Write-Host "  │  Without it, shared/room/equipment mailbox detection will use    │" -ForegroundColor Yellow
+    Write-Host "  │  heuristics instead of authoritative RecipientTypeDetails.       │" -ForegroundColor Yellow
+    Write-Host "  │  MFA data and risk analysis are NOT affected.                    │" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host ""
+    
+    $confirm = Read-Host "  Connect to Exchange Online? (Y/N)"
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "  Skipped Exchange Online connection." -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host "  Connecting to Exchange Online..." -ForegroundColor Yellow
+    try {
+        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+        Write-Host "  ✓ Connected to Exchange Online" -ForegroundColor Green
+        Write-Log "Connected to Exchange Online" -Level "SUCCESS"
+    }
+    catch {
+        Write-Host "  ✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "Exchange Online connection failed: $($_.Exception.Message)" -Level "ERROR"
+    }
 }
 
 # ============================================================================
@@ -158,12 +357,32 @@ function New-HtmlReport {
     )
 
     $totalUsers = $Summary.TotalUsers
-    $mfaEnabledPct = $Summary.MFAEnabledPercentage
+    $mfaEnabledPct = $Summary.MFAEnabledInteractivePct  # Entra-equivalent: enabled Members only
+    $mfaInteractiveCount = $Summary.InteractiveAccounts
     $mfaDisabledPct = $Summary.MFADisabledPercentage
     $criticalCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Critical' }).Count
     $highCount = ($UserData | Where-Object { $_.RiskLevel -eq 'High' }).Count
     $mediumCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Medium' }).Count
-    $lowCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Low' }).Count
+    $goodCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Good' }).Count
+    $secureCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Secure' }).Count
+
+    # Build phone country summary for HTML
+    $phoneCountryHtml = ""
+    $phoneUsers = $UserData | Where-Object { $_.phoneNumber -and $_.phoneNumber -ne $false }
+    if ($phoneUsers.Count -gt 0) {
+        $countryCounts = @{}
+        foreach ($pu in $phoneUsers) {
+            $country = Get-CountryFromPhone -PhoneNumber $pu.phoneNumber
+            if ($country) {
+                if ($countryCounts.ContainsKey($country)) { $countryCounts[$country]++ }
+                else { $countryCounts[$country] = 1 }
+            }
+        }
+        $countryRows = $countryCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object {
+            "<tr><td>$($_.Key)</td><td>$($_.Value)</td></tr>"
+        }
+        $phoneCountryHtml = $countryRows -join "`n"
+    }
 
     # Build JSON data for the table
     $jsonRows = $UserData | ForEach-Object {
@@ -224,7 +443,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .card.critical .value { color: #d32f2f; }
 .card.high .value { color: #f57c00; }
 .card.medium .value { color: #fbc02d; }
-.card.low .value { color: #388e3c; }
+.card.good .value { color: #0097a7; }
+.card.secure .value { color: #388e3c; }
 .card.info .value { color: #1565c0; }
 .filters { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
 .filters h3 { margin-bottom: 12px; color: #1a237e; }
@@ -235,6 +455,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .filter-group input[type="text"] { min-width: 200px; }
 .method-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; }
 .method-filters label { font-size: 0.8em; font-weight: 600; color: #555; margin-right: 8px; }
+.method-logic-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; padding: 4px 10px; background: #f5f5f5; border-radius: 16px; font-size: 0.75em; font-weight: 600; border: 1px solid #ddd; }
+.method-logic-toggle span { padding: 2px 8px; border-radius: 10px; cursor: pointer; color: #777; }
+.method-logic-toggle span.active { background: #1565c0; color: white; }
 .method-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: #e3f2fd; border-radius: 16px; font-size: 0.8em; cursor: pointer; user-select: none; border: 1px solid #bbdefb; }
 .method-chip.active { background: #1565c0; color: white; border-color: #1565c0; }
 .btn-reset { padding: 8px 16px; background: #e0e0e0; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
@@ -253,19 +476,31 @@ tr:hover { background: #f5f5f5; }
 tr.risk-critical { border-left: 4px solid #d32f2f; }
 tr.risk-high { border-left: 4px solid #f57c00; }
 tr.risk-medium { border-left: 4px solid #fbc02d; }
-tr.risk-low { border-left: 4px solid #388e3c; }
+tr.risk-good { border-left: 4px solid #0097a7; }
+tr.risk-secure { border-left: 4px solid #388e3c; }
 tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; }
 .badge-critical { background: #ffebee; color: #c62828; }
 .badge-high { background: #fff3e0; color: #e65100; }
 .badge-medium { background: #fffde7; color: #f57f17; }
-.badge-low { background: #e8f5e9; color: #2e7d32; }
+.badge-good { background: #e0f7fa; color: #00695c; }
+.badge-secure { background: #e8f5e9; color: #2e7d32; }
 .badge-na { background: #f5f5f5; color: #616161; }
 .badge-enabled { background: #e8f5e9; color: #2e7d32; }
 .badge-disabled { background: #ffebee; color: #c62828; }
 .badge-guest { background: #e3f2fd; color: #1565c0; }
 .badge-member { background: #f3e5f5; color: #6a1b9a; }
 .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #999; }
+.phone-country { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.phone-country h3 { color: #1a237e; margin-bottom: 10px; }
+.phone-country table { width: auto; border-collapse: collapse; font-size: 0.85em; }
+.phone-country td { padding: 4px 16px 4px 0; border: none; }
+.phone-country tr td:last-child { font-weight: 600; }
+.pii-notice { background: #fff8e1; border: 1px solid #f9a825; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #5d4037; display: flex; align-items: flex-start; gap: 12px; }
+.pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; }
+.pii-notice .pii-text strong { display: block; margin-bottom: 4px; color: #e65100; }
+.pii-notice .pii-dismiss { margin-left: auto; cursor: pointer; font-size: 1.1em; color: #999; flex-shrink: 0; padding: 0 4px; }
+.pii-notice .pii-dismiss:hover { color: #333; }
 @media (max-width: 768px) { .filter-row { flex-direction: column; } .filter-group select, .filter-group input { min-width: 100%; } }
 </style>
 </head>
@@ -275,20 +510,36 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 <div class="meta">Tenant: $TenantName | Generated: $generatedDate | Total Accounts: $totalUsers</div>
 </div>
 
+<div class="pii-notice" id="piiNotice">
+  <span class="pii-icon">&#9888;</span>
+  <div class="pii-text">
+    <strong>Data Privacy Notice (GDPR)</strong>
+    This report contains personal data: names, email addresses, phone numbers, and sign-in activity.
+    Store securely, share only with authorised personnel, retain only as long as operationally required, and dispose of securely when no longer needed.
+  </div>
+  <span class="pii-dismiss" onclick="document.getElementById('piiNotice').style.display='none'" title="Dismiss">&#x2715;</span>
+</div>
+
 <div class="dashboard">
 <div class="card info"><div class="value">$totalUsers</div><div class="label">Total Accounts</div></div>
-<div class="card info"><div class="value">${mfaEnabledPct}%</div><div class="label">MFA Enabled</div></div>
-<div class="card critical"><div class="value">$criticalCount</div><div class="label">Critical Risk</div></div>
+<div class="card info"><div class="value">${mfaEnabledPct}%</div><div class="label">MFA Enabled</div><div class="label" style="font-size:0.7em;color:#888">of $mfaInteractiveCount interactive accounts</div></div>
+<div class="card critical"><div class="value">$criticalCount</div><div class="label">Critical</div></div>
 <div class="card high"><div class="value">$highCount</div><div class="label">High Risk</div></div>
 <div class="card medium"><div class="value">$mediumCount</div><div class="label">Medium Risk</div></div>
-<div class="card low"><div class="value">$lowCount</div><div class="label">Low Risk</div></div>
+<div class="card good"><div class="value">$goodCount</div><div class="label">Good</div></div>
+<div class="card secure"><div class="value">$secureCount</div><div class="label">Secure</div></div>
+</div>
+
+<div class="phone-country">
+<h3>Phone Numbers by Country</h3>
+<table>$phoneCountryHtml</table>
 </div>
 
 <div class="filters">
 <h3>Filters</h3>
 <div class="filter-row">
 <div class="filter-group"><label>Search (Name / UPN)</label><input type="text" id="searchBox" placeholder="Type to search..."></div>
-<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option value="Critical">Critical</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option><option value="N/A">N/A</option></select></div>
+<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option value="Critical">Critical</option><option value="High">High</option><option value="Medium">Medium</option><option value="Good">Good</option><option value="Secure">Secure</option><option value="N/A">N/A</option></select></div>
 <div class="filter-group"><label>MFA Status</label><select id="filterMfa"><option value="">All</option><option value="Enabled">Enabled</option><option value="Disabled">Disabled</option><option value="Unknown">Unknown</option></select></div>
 <div class="filter-group"><label>User Type</label><select id="filterType"><option value="">All</option><option value="Member">Member</option><option value="Guest">Guest</option></select></div>
 <div class="filter-group"><label>Account Category</label><select id="filterCategory"><option value="">All</option><option value="User">User</option><option value="Room">Room</option><option value="Shared Mailbox">Shared Mailbox</option><option value="Equipment">Equipment</option></select></div>
@@ -308,6 +559,7 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 <span class="method-chip" data-method="Software OATH" onclick="toggleMethod(this)">Software OATH</span>
 <span class="method-chip" data-method="Email" onclick="toggleMethod(this)">Email</span>
 <span class="method-chip" data-method="TAP" onclick="toggleMethod(this)">TAP</span>
+<div class="method-logic-toggle"><span id="modeOr" class="active" onclick="setMethodMode('or')">OR</span><span id="modeAnd" onclick="setMethodMode('and')">AND</span></div>
 </div>
 </div>
 
@@ -345,7 +597,8 @@ const DATA = JSON.parse('$jsonData');
 let sortCol = 'riskLevel';
 let sortDir = 'asc';
 let activeMethodFilters = [];
-const riskOrder = {Critical:0, High:1, Medium:2, Low:3, 'N/A':4};
+let methodFilterMode = 'or';
+const riskOrder = {Critical:0, High:1, Medium:2, Good:3, Secure:4, 'N/A':5};
 
 function getRiskClass(r) { return 'risk-' + (r === 'N/A' ? 'na' : r.toLowerCase()); }
 function getBadgeClass(r) { return 'badge-' + (r === 'N/A' ? 'na' : r.toLowerCase()); }
@@ -390,7 +643,11 @@ function renderTable() {
         }
         if (activeMethodFilters.length > 0) {
             const userMethods = r.mfaMethods.toLowerCase();
-            if (!activeMethodFilters.some(m => userMethods.includes(m.toLowerCase()))) return false;
+            if (methodFilterMode === 'and') {
+                if (!activeMethodFilters.every(m => userMethods.includes(m.toLowerCase()))) return false;
+            } else {
+                if (!activeMethodFilters.some(m => userMethods.includes(m.toLowerCase()))) return false;
+            }
         }
         return true;
     });
@@ -448,6 +705,13 @@ function toggleMethod(el) {
     renderTable();
 }
 
+function setMethodMode(mode) {
+    methodFilterMode = mode;
+    document.getElementById('modeOr').classList.toggle('active', mode === 'or');
+    document.getElementById('modeAnd').classList.toggle('active', mode === 'and');
+    renderTable();
+}
+
 function resetFilters() {
     document.getElementById('searchBox').value = '';
     document.getElementById('filterRisk').value = '';
@@ -459,6 +723,9 @@ function resetFilters() {
     document.getElementById('filterLicensed').value = '';
     document.getElementById('filterSignIn').value = '';
     activeMethodFilters = [];
+    methodFilterMode = 'or';
+    document.getElementById('modeOr').classList.add('active');
+    document.getElementById('modeAnd').classList.remove('active');
     document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
     renderTable();
 }
@@ -476,33 +743,27 @@ renderTable();
 }
 
 # ============================================================================
-# Main Script Logic
+# Report Generation Function
 # ============================================================================
+function Invoke-MFAReport {
+    param(
+        [hashtable]$OutputOptions
+    )
+    
+    $ExportToCsv = $OutputOptions.Csv
+    $ExportToHtml = $OutputOptions.Html
+
 try {
     Write-Log "Starting Entra MFA Report generation" -Level "INFO"
-
-    # Required Graph API scopes
-    $requiredScopes = @(
-        "User.Read.All",
-        "Directory.Read.All",
-        "UserAuthenticationMethod.Read.All",
-        "AuditLog.Read.All",
-        "Reports.Read.All"
-    )
 
     # Check for existing Microsoft Graph connection
     $context = Get-MgContext
     if (-not $context) {
         Write-Host ""
-        Write-Host "ERROR: No active Microsoft Graph connection found." -ForegroundColor Red
+        Write-Host "  ✗ No active Microsoft Graph connection." -ForegroundColor Red
+        Write-Host "    Use menu option [1] to connect first." -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "Please connect to Microsoft Graph first using the following command:" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  Connect-MgGraph -Scopes `"$($requiredScopes -join '","')`" -NoWelcome" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "Then re-run this script." -ForegroundColor Yellow
-        Write-Host ""
-        exit 1
+        return
     }
 
     Write-Log "Using existing Microsoft Graph connection (Tenant: $($context.TenantId))" -Level "INFO"
@@ -511,6 +772,7 @@ try {
     # Retrieve Users with extended properties
     # ========================================================================
     Write-Log "Retrieving all users from Entra ID..." -Level "INFO"
+    $signInActivityAvailable = $true
     try {
         [System.Collections.ArrayList]$allusers = Get-MgUser -All -Property DisplayName, UserPrincipalName, UserType, AccountEnabled, AssignedLicenses, SignInActivity, CreatedDateTime, Mail -ErrorAction Stop
     }
@@ -526,6 +788,14 @@ try {
             Write-Host "4. Use Azure Cloud Shell or trusted workstation" -ForegroundColor White
             Write-Host "`nError details logged to: $LogFile" -ForegroundColor Gray
             return
+        }
+        elseif ($_.Exception.Message -match "AuditLog.Read.All|Authentication_MSGraphPermissionMissing|Authorization_RequestDenied|Insufficient privileges") {
+            Write-Log "AuditLog.Read.All permission not available - sign-in activity will be omitted. Reconnect via menu option [1] to include it." -Level "WARNING"
+            Write-Host "  ! Sign-in activity permission not granted - last sign-in data will not be available." -ForegroundColor Yellow
+            Write-Host "    To include sign-in activity, use menu option [1] to reconnect and consent to all scopes." -ForegroundColor Gray
+            Write-Host ""
+            $signInActivityAvailable = $false
+            [System.Collections.ArrayList]$allusers = Get-MgUser -All -Property DisplayName, UserPrincipalName, UserType, AccountEnabled, AssignedLicenses, CreatedDateTime, Mail -ErrorAction Stop
         }
         else {
             Write-Log "Unexpected error retrieving users: $($_.Exception.Message)" -Level "ERROR"
@@ -569,28 +839,29 @@ try {
     # ========================================================================
     # Detect account categories via Exchange Online RecipientTypeDetails
     # ========================================================================
-    Write-Log "Retrieving mailbox types from Exchange Online..." -Level "INFO"
     $mailboxTypes = @{}  # UPN -> RecipientTypeDetails
     $exoConnected = $false
-    try {
-        $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
-        if (-not $exoSession) {
-            Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-            $exoConnected = $true
-        }
-
-        $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop
-        foreach ($mbx in $mailboxes) {
-            if ($mbx.UserPrincipalName) {
-                $mailboxTypes[$mbx.UserPrincipalName.ToLower()] = $mbx.RecipientTypeDetails
+    $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
+    if ($exoSession) {
+        Write-Log "Retrieving mailbox types from Exchange Online..." -Level "INFO"
+        try {
+            $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop
+            foreach ($mbx in $mailboxes) {
+                if ($mbx.UserPrincipalName) {
+                    $mailboxTypes[$mbx.UserPrincipalName.ToLower()] = $mbx.RecipientTypeDetails
+                }
             }
-        }
 
         $typeSummary = $mailboxes | Group-Object RecipientTypeDetails | ForEach-Object { "$($_.Name): $($_.Count)" }
         Write-Log "Mailbox types retrieved: $($typeSummary -join ', ')" -Level "INFO"
+        }
+        catch {
+            Write-Log "Could not retrieve mailbox types from Exchange Online: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
+        }
     }
-    catch {
-        Write-Log "Could not retrieve mailbox types from Exchange Online: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
+    else {
+        Write-Log "Exchange Online not connected. Using heuristic detection for mailbox types." -Level "WARNING"
+        Write-Host "  ⚠ Exchange Online not connected - using heuristic mailbox detection" -ForegroundColor Yellow
     }
 
     # Also try Places API for room/equipment detection (requires Place.Read.All - optional)
@@ -643,6 +914,10 @@ try {
 
         # Determine account category
         $accountCategory = "User"
+        if (-not $user.UserPrincipalName) {
+            Write-Log "Skipping user '$($user.DisplayName)' - null UserPrincipalName" -Level "WARNING"
+            continue
+        }
         $upnLower = $user.UserPrincipalName.ToLower()
         $mailLower = if ($user.Mail) { $user.Mail.ToLower() } else { "" }
         $displayLower = if ($user.DisplayName) { $user.DisplayName.ToLower() } else { "" }
@@ -690,9 +965,9 @@ try {
             }
         }
 
-        # Last sign-in
+        # Last sign-in (requires AuditLog.Read.All; omitted gracefully if unavailable)
         $lastSignIn = $null
-        if ($user.SignInActivity -and $user.SignInActivity.LastSignInDateTime) {
+        if ($signInActivityAvailable -and $user.SignInActivity -and $user.SignInActivity.LastSignInDateTime) {
             $lastSignIn = $user.SignInActivity.LastSignInDateTime.ToString("yyyy-MM-dd")
         }
 
@@ -767,8 +1042,12 @@ try {
                         $output.MFAstatus = "enabled"
                     }
                     "#microsoft.graph.temporaryAccessPassAuthenticationMethod" {
-                        $output.tempPass = $true
-                        $output.MFAstatus = "enabled"
+                        # Only count TAP if it's still usable (not expired)
+                        $isUsable = $method.AdditionalProperties["isUsable"]
+                        if ($isUsable -eq $true) {
+                            $output.tempPass = $true
+                            $output.MFAstatus = "enabled"
+                        }
                     }
                     "#microsoft.graph.passwordlessMicrosoftAuthenticatorAuthenticationMethod" {
                         $output.passwordLess = $true
@@ -798,9 +1077,19 @@ try {
                 $output.RiskLevel = "Medium"
                 $output.RiskNotes = "No phishing-resistant method"
             }
+            elseif ($output.phoneSMS -or $output.emailAuth -or $output.softwareAuth -or $output.authApp) {
+                # Has phishing-resistant but also weak methods registered
+                $weakMethods = @()
+                if ($output.phoneSMS) { $weakMethods += "Phone/SMS" }
+                if ($output.emailAuth) { $weakMethods += "Email" }
+                if ($output.softwareAuth) { $weakMethods += "Software OATH" }
+                if ($output.authApp) { $weakMethods += "Authenticator" }
+                $output.RiskLevel = "Good"
+                $output.RiskNotes = "Phishing-resistant + weak methods: $($weakMethods -join ', ')"
+            }
             else {
-                $output.RiskLevel = "Low"
-                $output.RiskNotes = "Phishing-resistant MFA"
+                $output.RiskLevel = "Secure"
+                $output.RiskNotes = "All methods phishing-resistant"
             }
 
             $export.Add($output) | Out-Null
@@ -892,6 +1181,19 @@ try {
     $mfaUnknown = ($export | Where-Object { $_.MFAstatus -eq "unknown" }).Count
     $appPasswordUsers = ($export | Where-Object { $_.appPassword -eq $true }).Count
 
+    # Interactive account pool: enabled Members + enabled Admins (excludes guests,
+    # disabled accounts, and service account categories like room/shared/equipment).
+    # This matches the denominator used by Entra's Authentication Methods monitoring view.
+    $serviceCategories = @('Shared Mailbox', 'Room Mailbox', 'Equipment Mailbox')
+    $interactiveAccounts = $export | Where-Object {
+        $_.enabled -eq $true -and
+        $_.usertype -eq 'Member' -and
+        $_.accountCategory -notin $serviceCategories
+    }
+    $interactiveCount = $interactiveAccounts.Count
+    $mfaEnabledInteractive = ($interactiveAccounts | Where-Object { $_.MFAstatus -eq "enabled" }).Count
+    $mfaPctInteractive = if ($interactiveCount -gt 0) { [math]::Round(($mfaEnabledInteractive / $interactiveCount) * 100, 1) } else { 0 }
+
     # Segment by type
     $memberAccounts = $export | Where-Object { $_.usertype -eq 'Member' -and -not $_.isAdmin }
     $guestAccounts = $export | Where-Object { $_.usertype -eq 'Guest' }
@@ -900,6 +1202,11 @@ try {
     Write-Host ("=" * 80) -ForegroundColor Green
     Write-Host "Entra ID MFA Report - Generated: $date" -ForegroundColor Green
     Write-Host ("=" * 80) -ForegroundColor Green
+    Write-Host "`nACCOUNT SCOPE:" -ForegroundColor Yellow
+    Write-Host "  Total accounts (all types):        $totalUsers" -ForegroundColor White
+    Write-Host "  Interactive accounts (Entra view): $interactiveCount  (enabled Members, excl. room/shared/equipment)" -ForegroundColor White
+    Write-Host "  MFA coverage - all accounts:       $([math]::Round(($mfaEnabled / $totalUsers) * 100, 1))%  ($mfaEnabled / $totalUsers)" -ForegroundColor White
+    Write-Host "  MFA coverage - interactive only:   ${mfaPctInteractive}%  ($mfaEnabledInteractive / $interactiveCount)  [matches Entra portal view]" -ForegroundColor Cyan
 
     # --- USERS (Members, non-admin) ---
     Write-Host "`nUSERS (Members, non-admin):" -ForegroundColor Yellow
@@ -945,12 +1252,14 @@ try {
     $riskCritical = ($export | Where-Object { $_.RiskLevel -eq "Critical" }).Count
     $riskHigh = ($export | Where-Object { $_.RiskLevel -eq "High" }).Count
     $riskMedium = ($export | Where-Object { $_.RiskLevel -eq "Medium" }).Count
-    $riskLow = ($export | Where-Object { $_.RiskLevel -eq "Low" }).Count
+    $riskGood = ($export | Where-Object { $_.RiskLevel -eq "Good" }).Count
+    $riskSecure = ($export | Where-Object { $_.RiskLevel -eq "Secure" }).Count
     $riskNA = ($export | Where-Object { $_.RiskLevel -eq "N/A" }).Count
     Write-Host "  Critical (No MFA): $riskCritical" -ForegroundColor Red
     Write-Host "  High (SMS-only): $riskHigh" -ForegroundColor DarkYellow
     Write-Host "  Medium (No phishing-resistant): $riskMedium" -ForegroundColor Yellow
-    Write-Host "  Low (Phishing-resistant): $riskLow" -ForegroundColor Green
+    Write-Host "  Good (Has phishing-resistant + weak methods): $riskGood" -ForegroundColor Cyan
+    Write-Host "  Secure (All methods phishing-resistant): $riskSecure" -ForegroundColor Green
     Write-Host "  N/A (Disabled/Blocked): $riskNA" -ForegroundColor Gray
 
     # --- MFA METHODS ---
@@ -975,6 +1284,23 @@ try {
         }
     }
 
+    # --- PHONE NUMBERS BY COUNTRY ---
+    $phoneUsers = $export | Where-Object { $_.phoneNumber -and $_.phoneNumber -ne $false }
+    if ($phoneUsers.Count -gt 0) {
+        Write-Host "`nPHONE NUMBERS BY COUNTRY:" -ForegroundColor Yellow
+        $countryCounts = @{}
+        foreach ($pu in $phoneUsers) {
+            $country = Get-CountryFromPhone -PhoneNumber $pu.phoneNumber
+            if ($country) {
+                if ($countryCounts.ContainsKey($country)) { $countryCounts[$country]++ }
+                else { $countryCounts[$country] = 1 }
+            }
+        }
+        $countryCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object {
+            Write-Host "  $($_.Key): $($_.Value)"
+        }
+    }
+
     Write-Host ("=" * 80) -ForegroundColor Green
 
     # ========================================================================
@@ -989,10 +1315,14 @@ try {
         MFAEnabledPercentage    = [math]::Round(($mfaEnabled / $totalUsers) * 100, 2)
         MFADisabled             = $mfaDisabled
         MFADisabledPercentage   = [math]::Round(($mfaDisabled / $totalUsers) * 100, 2)
+        InteractiveAccounts     = $interactiveCount
+        MFAEnabledInteractive   = $mfaEnabledInteractive
+        MFAEnabledInteractivePct = $mfaPctInteractive
         RiskCritical            = $riskCritical
         RiskHigh                = $riskHigh
         RiskMedium              = $riskMedium
-        RiskLow                 = $riskLow
+        RiskGood                = $riskGood
+        RiskSecure              = $riskSecure
         RiskNA                  = $riskNA
         AdminCount              = $adminAccounts.Count
         AdminsWithoutMFA        = $aMfaOffEnabled
@@ -1016,9 +1346,6 @@ try {
 
         Write-Log "Exporting summary to: $summaryFilename" -Level "INFO"
         $enhancedReport | Export-Csv $summaryFilename -Delimiter ";" -Encoding UTF8 -NoTypeInformation
-
-        Write-Host "CSV exported: $csvFilename" -ForegroundColor Green
-        Write-Host "Summary exported: $summaryFilename" -ForegroundColor Green
     }
 
     # ========================================================================
@@ -1057,46 +1384,79 @@ try {
         else {
             Write-Log "Edge not found. Open manually: $htmlFullPath" -Level "WARNING"
         }
+    }
 
+    # ========================================================================
+    # Export Summary
+    # ========================================================================
+    if ($ExportToCsv -or $ExportToHtml) {
         Write-Host ""
-        Write-Host ("=" * 80) -ForegroundColor Green
-        Write-Host "HTML REPORT: $htmlFullPath" -ForegroundColor Cyan
-        Write-Host ("=" * 80) -ForegroundColor Green
-    }
-
-    # ========================================================================
-    # Return Data
-    # ========================================================================
-    if ($ReturnData) {
-        return [PSCustomObject]@{
-            Users      = $export
-            Summary    = $enhancedReport
-            Statistics = [PSCustomObject]@{
-                TotalUsers       = $totalUsers
-                EnabledAccounts  = $enabledAccounts
-                MFAEnabled       = $mfaEnabled
-                MFADisabled      = $mfaDisabled
-                MFAUnknown       = $mfaUnknown
-                AppPasswordUsers = $appPasswordUsers
-                RiskCritical     = $riskCritical
-                RiskHigh         = $riskHigh
-                RiskMedium       = $riskMedium
-                RiskLow          = $riskLow
-                AdminCount       = $adminAccounts.Count
-                ProcessingErrors = $errorCount
-                CAErrors         = $caErrorCount
-            }
+        Write-Host ("=" * 80) -ForegroundColor Cyan
+        Write-Host "EXPORTED FILES:" -ForegroundColor Cyan
+        if ($ExportToCsv) {
+            Write-Host "  CSV Detail:  $((Resolve-Path $csvFilename).Path)" -ForegroundColor White
+            Write-Host "  CSV Summary: $((Resolve-Path $summaryFilename).Path)" -ForegroundColor White
         }
-    }
-
-    # Disconnect Exchange Online if we connected it
-    if ($exoConnected) {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+        if ($ExportToHtml) {
+            Write-Host "  HTML Report: $htmlFullPath" -ForegroundColor White
+        }
+        Write-Host ("=" * 80) -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host ("=" * 80) -ForegroundColor Yellow
+        Write-Host "  DATA PRIVACY NOTICE" -ForegroundColor Yellow
+        Write-Host ("=" * 80) -ForegroundColor Yellow
+        Write-Host "  These files contain personal data (names, email addresses, phone" -ForegroundColor Yellow
+        Write-Host "  numbers, sign-in activity). Handle in accordance with your" -ForegroundColor Yellow
+        Write-Host "  organisation's data protection policy (GDPR / applicable law):" -ForegroundColor Yellow
+        Write-Host "    * Store in a secure, access-controlled location" -ForegroundColor Yellow
+        Write-Host "    * Share only with authorised recipients" -ForegroundColor Yellow
+        Write-Host "    * Retain only as long as operationally required" -ForegroundColor Yellow
+        Write-Host "    * Dispose of securely when no longer needed" -ForegroundColor Yellow
+        Write-Host ("=" * 80) -ForegroundColor Yellow
     }
 
     Write-Log "MFA Report generation completed successfully" -Level "SUCCESS"
 }
 catch {
     Write-Log "Error during script execution: $($_.Exception.Message)" -Level "ERROR"
-    Write-Error "Script execution failed: $($_.Exception.Message)"
+    Write-Host "  ✗ Error: $($_.Exception.Message)" -ForegroundColor Red
 }
+
+} # End of Invoke-MFAReport function
+
+# ============================================================================
+# Main Menu Loop
+# ============================================================================
+do {
+    Show-MainMenu
+    $choice = Read-Host "  Enter choice (1-3, Q to quit)"
+    $choice = $choice.Trim().ToUpper()
+
+    switch ($choice) {
+        '1' { Connect-Graph }
+        '2' { Connect-Exo }
+        '3' {
+            $outputOptions = Show-OutputMenu
+            Invoke-MFAReport -OutputOptions $outputOptions
+        }
+        'Q' {
+            # Disconnect services
+            $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
+            if ($exoSession) {
+                Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            $ctx = Get-MgContext -ErrorAction SilentlyContinue
+            if ($ctx) {
+                Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+            }
+            Write-Host ""
+            Write-Host "  Goodbye!" -ForegroundColor Cyan
+            Write-Host ""
+            break
+        }
+        default {
+            Write-Host "  Invalid choice. Please enter 1-3 or Q." -ForegroundColor Red
+            Start-Sleep -Seconds 1
+        }
+    }
+} while ($choice -ne 'Q')
