@@ -959,7 +959,7 @@ function renderSummary() {
         '<div class="mfa-bar-segment" style="width:' + pct(s.n) + '%;background:' + s.color + '" title="' + s.label + ': ' + s.n + '"></div>'
     ).join('');
     document.getElementById('mfaBarLegend').innerHTML = segments.filter(s => s.n > 0).map(s =>
-        '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + s.label + ': <strong>' + s.n + '</strong></span>'
+        '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + s.label + ': <strong>' + s.n + '</strong> (' + pct(s.n) + '%)</span>'
     ).join('');
 
     // Mini card helper — val is X, total is N, renders X<small> / N</small>
