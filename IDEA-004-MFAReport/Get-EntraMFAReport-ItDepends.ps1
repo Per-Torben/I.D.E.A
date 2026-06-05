@@ -4,77 +4,17 @@
 
 .DESCRIPTION
     Provides an interactive menu experience for generating comprehensive MFA reports.
-    Analyzes MFA registration status for all users in the tenant using Microsoft Graph
-    Beta API (Get-MgBetaUserAuthenticationMethod).
-
-    OUTPUT — HTML REPORT
-    --------------------
-    The self-contained HTML report consists of three main sections:
-
-    1. MFA METHOD DISTRIBUTION BAR
-       A full-width stacked bar showing how all enabled accounts are distributed across
-       four MFA strength tiers, left to right from weakest to strongest:
-
-       - No MFA (red)            : Account is enabled but has no MFA method registered.
-       - Weak only (orange)      : Has SMS, voice call, or email OTP registered, but no
-                                   Authenticator app and no phishing-resistant method.
-       - Authenticator only (amber): Has the Microsoft Authenticator app registered, but
-                                   no phishing-resistant method.
-       - Phishing-resistant (green): Has at least one of FIDO2 security key, Windows Hello
-                                   for Business, or Passwordless phone sign-in registered.
-
-       Note: Categories are mutually exclusive. A user with both Authenticator and FIDO2
-       is counted only in the Phishing-resistant segment.
-
-    2. ADMINS AND MEMBERS STAT CARDS
-       Two columns of three mini-cards, one column per group:
-
-       - Admins  : Enabled accounts that hold at least one Entra directory or privileged
-                   role (as detected by Get-MgDirectoryRole membership).
-       - Members : Enabled accounts with userType = Member, excluding admins. Includes
-                   all account categories (user, room, shared, equipment) — any enabled
-                   member account can be targeted and needs MFA protection.
-
-       Each column shows three cards with counts as X / N (X = matching accounts, N = total
-       in that group):
-
-       - Without MFA        : No MFA method registered. Card is red if count > 0, green if 0.
-       - Weak MFA           : Has SMS, voice, or email registered (regardless of other methods).
-                              Card is orange if count > 0, green if 0. Note: a user with both
-                              FIDO2 and SMS counts here, because the weak method can still be
-                              targeted by attackers (SIM swap, SS7 interception, email phishing).
-       - Phishing-resistant : Has FIDO2, Windows Hello for Business, or Passwordless registered.
-                              Always blue. Counts users who have at least one strong method,
-                              even if they also have weaker methods registered alongside it.
-
-       A footer line below the cards shows a compact guest summary:
-       "Guests (N): X without MFA · Y weak MFA · Z with MFA"
-
-    3. RISK SCORES (pie chart)
-       The risk score is assigned per account based on the strongest and weakest methods
-       registered. Possible values:
-
-       - Critical : No MFA registered. Account relies solely on password — full compromise
-                    risk from credential stuffing, phishing, or brute force.
-       - High     : SMS or voice call is the only MFA method. Vulnerable to SIM-swap attacks
-                    and SS7 protocol exploitation. Provides weak but non-zero protection.
-       - Medium   : Has MFA (e.g. Authenticator, Software OATH, email OTP) but no phishing-
-                    resistant method. Vulnerable to real-time phishing proxies (AiTM) that
-                    can intercept push approvals or TOTP codes.
-       - Good     : Has at least one phishing-resistant method (FIDO2, Hello, Passwordless)
-                    but also has weaker methods registered alongside it. The weak methods
-                    represent residual attack surface that could be exploited as fallback.
-       - Secure   : All registered MFA methods are phishing-resistant. No weak fallback
-                    methods registered. Highest assurance level achievable.
-       - N/A      : Account is disabled. Risk is not assessed for disabled accounts.
-
-    Other features:
-    - Phone number country distribution pie chart (from registered phone MFA numbers)
-    - Interactive filters: risk level, MFA status, user type, account category, sign-in
-      activity, licensing, admin status, and MFA method presence (AND/OR logic)
-    - Sortable table with all accounts and their MFA method details
-    - Account category detection (User/Room/Shared Mailbox/Equipment)
-    - Admin status, licensing, and last sign-in activity tracking
+    Analyzes MFA status for all users in the tenant using Microsoft Graph Beta API.
+    
+    Features:
+    - Interactive menu for connecting to services and generating reports
+    - Microsoft Graph connection (required) and Exchange Online (optional)
+    - Selectable output formats: Console, HTML, CSV, or any combination
+    - Risk assessment with 5 levels (Critical/High/Medium/Good/Secure)
+    - Phone number country distribution analysis
+    - Self-contained interactive HTML report with sorting, filtering, and search
+    - Account category detection (user/room/shared/equipment)
+    - Admin status, licensing, and sign-in activity tracking
 
 .PARAMETER LogDirectory
     Directory path for log files. Defaults to .\Logs
@@ -128,12 +68,8 @@
     "Granted scopes" in the VERBOSE output to confirm which scopes the token contains.
     
     Author: Per-Torben Sørensen
-    Version: 2.3
+    Version: 2.2
     Created: October 2025
-    Tested on: PowerShell 7.6
-               ExchangeOnlineManagement 3.9.0
-               Microsoft.Graph 2.34.0
-               Microsoft.Graph.Beta 2.34.0
     Updated: June 2026 - Added HTML report, risk levels, account categories, sign-in activity
                        - Replaced usage-report mailbox detection with Exchange Online RecipientTypeDetails
                        - Edge now opens report in normal window instead of guest mode
@@ -141,11 +77,6 @@
                        - Added pre-flight scope check with actionable consent fix instructions
                        - WAM token cache troubleshooting documented and handled in Connect-Graph
                        - Fixed Authorization_RequestDenied misclassified as AuditLog error
-                       - Redesigned HTML dashboard: MFA distribution bar, admin/member/guest
-                         stat cards with X/N fractions, risk and phone pie charts
-                       - MFA strength model: No MFA / Weak (SMS+voice+email) /
-                         Phishing-resistant (FIDO2+Hello+Passwordless)
-                       - All dashboard stats computed from DATA array at runtime (JS)
 
     DATA PRIVACY / GDPR NOTICE:
     Output files (HTML and CSV) contain personal data including names, email addresses,
@@ -515,21 +446,13 @@ function New-HtmlReport {
     )
 
     $totalUsers = $Summary.TotalUsers
+    $mfaMembersPct = $Summary.MFAEnabledMembersPct
     $mfaMembersCount = $Summary.MFAEnabledMembers
     $enabledMemberCount = $Summary.EnabledMemberAccounts
-    $membersNoMFA = $Summary.MembersNoMFA
-    $membersWeakMFA = $Summary.MembersWeakMFA
-    $membersPhishingResistant = $Summary.MembersPhishingResistant
+    $mfaGuestsPct = $Summary.MFAEnabledGuestsPct
     $mfaGuestsCount = $Summary.MFAEnabledGuests
     $guestCount = $Summary.GuestAccounts
-    $guestsNoMFA = $Summary.GuestsNoMFA
-    $guestsWeakMFA = $Summary.GuestsWeakMFA
     $disabledCount = $Summary.DisabledAccounts
-    $adminTotal = $Summary.AdminCount
-    $adminsMFA = $Summary.AdminsMFA
-    $adminsNoMFA = $Summary.AdminsNoMFA
-    $adminsWeakMFA = $Summary.AdminsWeakMFA
-    $adminsPhishingResistant = $Summary.AdminsPhishingResistant
     $mfaDisabledPct = $Summary.MFADisabledPercentage
     $criticalCount = ($UserData | Where-Object { $_.RiskLevel -eq 'Critical' }).Count
     $highCount = ($UserData | Where-Object { $_.RiskLevel -eq 'High' }).Count
@@ -662,33 +585,17 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge-guest { background: #e3f2fd; color: #1565c0; }
 .badge-member { background: #f3e5f5; color: #6a1b9a; }
 .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #999; }
+.phone-country { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.phone-country h3 { color: #1a237e; margin-bottom: 10px; }
+.phone-country table { width: auto; border-collapse: collapse; font-size: 0.85em; }
+.phone-country td { padding: 4px 16px 4px 0; border: none; }
+.phone-country tr td:last-child { font-weight: 600; }
 .pii-notice { background: #fff8e1; border: 1px solid #f9a825; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #5d4037; display: flex; align-items: flex-start; gap: 12px; }
 .pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; }
 .pii-notice .pii-text strong { display: block; margin-bottom: 4px; color: #e65100; }
 .pii-notice .pii-dismiss { margin-left: auto; cursor: pointer; font-size: 1.1em; color: #999; flex-shrink: 0; padding: 0 4px; }
 .pii-notice .pii-dismiss:hover { color: #333; }
 @media (max-width: 768px) { .filter-row { flex-direction: column; } .filter-group select, .filter-group input { min-width: 100%; } }
-.summary-block { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
-.mfa-bar-track { display: flex; height: 28px; border-radius: 6px; overflow: hidden; margin-bottom: 10px; background: #eee; }
-.mfa-bar-segment { height: 100%; transition: width 0.3s; }
-.mfa-bar-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.8em; color: #444; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #eee; }
-.mfa-bar-legend-item { display: flex; align-items: center; gap: 5px; }
-.mfa-bar-legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
-.summary-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-.summary-col { padding: 0 20px; }
-.summary-col:first-child { padding-left: 0; border-right: 2px solid #e0e0e0; }
-.summary-col:last-child { padding-right: 0; }
-.summary-col-header { display: flex; align-items: center; gap: 8px; font-size: 0.9em; font-weight: 700; color: #1a237e; margin-bottom: 12px; }
-.summary-mini-cards { display: flex; gap: 10px; flex-wrap: wrap; }
-.summary-mini-card { background: #f8f9fa; border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 80px; text-align: center; border: 1px solid #e8e8e8; }
-.summary-mini-card .smc-value { font-size: 1.6em; font-weight: 700; }
-.summary-mini-card .smc-label { font-size: 0.72em; color: #666; margin-top: 2px; }
-.summary-footer { margin-top: 14px; padding: 10px 0 4px; border-top: 2px solid #e0e0e0; font-size: 0.88em; font-weight: 500; color: #333; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.risk-dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: middle; }
-.pie-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.pie-box-title { font-size: 0.9em; font-weight: 700; color: #1a237e; margin-bottom: 10px; }
-.pie-box-inner { display: flex; align-items: center; gap: 16px; }
-.pie-legend { display: flex; flex-direction: column; gap: 5px; }
 </style>
 </head>
 <body>
@@ -707,40 +614,23 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
   <span class="pii-dismiss" onclick="document.getElementById('piiNotice').style.display='none'" title="Dismiss">&#x2715;</span>
 </div>
 
-<div class="summary-block" id="summaryBlock">
-  <div id="mfaBarLabel" class="summary-col-header" style="margin-bottom:8px;"></div>
-  <div class="mfa-bar-track" id="mfaBar"></div>
-  <div class="mfa-bar-legend" id="mfaBarLegend"></div>
-  <div class="summary-columns">
-    <div class="summary-col">
-      <div class="summary-col-header" id="adminColHeader">&#128737; Admins</div>
-      <div class="summary-mini-cards" id="adminCards"></div>
-    </div>
-    <div class="summary-col">
-      <div class="summary-col-header" id="memberColHeader">&#128101; Members</div>
-      <div class="summary-mini-cards" id="memberCards"></div>
-    </div>
-  </div>
-  <div class="summary-footer" id="summaryFooter"></div>
+<div class="dashboard">
+<div class="card info"><div class="value">$totalUsers</div><div class="label">it depends</div></div>
+<div class="card info"><div class="value">${mfaMembersPct}%</div><div class="label">it depends</div><div class="label" style="font-size:0.7em;color:#888">it depends</div></div>
+<div class="card info"><div class="value">${mfaGuestsPct}%</div><div class="label">it depends</div><div class="label" style="font-size:0.7em;color:#888">it depends</div></div>
+<div class="card info"><div class="value">$disabledCount</div><div class="label">it depends</div><div class="label" style="font-size:0.7em;color:#888">it depends</div></div>
+</div>
+<div class="dashboard">
+<div class="card critical"><div class="value">$criticalCount</div><div class="label">it depends</div></div>
+<div class="card high"><div class="value">$highCount</div><div class="label">it depends</div></div>
+<div class="card medium"><div class="value">$mediumCount</div><div class="label">it depends</div></div>
+<div class="card good"><div class="value">$goodCount</div><div class="label">it depends</div></div>
+<div class="card secure"><div class="value">$secureCount</div><div class="label">it depends</div></div>
 </div>
 
-<div class="summary-block">
-  <div class="pie-row">
-    <div>
-      <div class="pie-box-title">Risk Summary</div>
-      <div class="pie-box-inner">
-        <svg id="riskPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg>
-        <div class="pie-legend" id="riskPieLegend"></div>
-      </div>
-    </div>
-    <div>
-      <div class="pie-box-title">Phone Numbers by Country</div>
-      <div class="pie-box-inner">
-        <svg id="phonePie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg>
-        <div class="pie-legend" id="phonePieLegend"></div>
-      </div>
-    </div>
-  </div>
+<div class="phone-country">
+<h3>Phone Numbers by Country</h3>
+<table>$phoneCountryHtml</table>
 </div>
 
 <div class="filters">
@@ -920,134 +810,6 @@ function setMethodMode(mode) {
     renderTable();
 }
 
-function toggleSection(header) {
-    header.classList.toggle('collapsed');
-    const body = header.nextElementSibling;
-    body.classList.toggle('hidden');
-}
-
-function renderSummary() {
-    const isPhishRes  = m => m.includes('FIDO2') || m.includes('Windows Hello') || m.includes('Passwordless');
-    const hasAuthApp  = m => m.includes('Authenticator');
-    const hasWeakMeth = m => m.includes('Phone/SMS') || m.includes('Email');
-    const isWeakOnly  = m => hasWeakMeth(m) && !isPhishRes(m) && !hasAuthApp(m);
-    const isAuthOnly  = m => hasAuthApp(m) && !isPhishRes(m);
-
-    const enabled = DATA.filter(r => r.accountStatus === 'Enabled');
-    const admins  = enabled.filter(r => r.isAdmin === 'Yes');
-    const members = enabled.filter(r => r.userType === 'Member' && r.isAdmin !== 'Yes');
-    const guests  = enabled.filter(r => r.userType === 'Guest');
-    const total   = enabled.length;
-
-    // Stacked bar
-    const barNoMFA   = enabled.filter(r => r.mfaStatus === 'Disabled').length;
-    const barWeak    = enabled.filter(r => r.mfaStatus === 'Enabled' && isWeakOnly(r.mfaMethods)).length;
-    const barAuth    = enabled.filter(r => r.mfaStatus === 'Enabled' && isAuthOnly(r.mfaMethods)).length;
-    const barPhish   = enabled.filter(r => r.mfaStatus === 'Enabled' && isPhishRes(r.mfaMethods)).length;
-    const barOther   = total - barNoMFA - barWeak - barAuth - barPhish;
-    const pct = n => total > 0 ? (n / total * 100).toFixed(1) : 0;
-    const segments = [
-        { n: barNoMFA, color: '#d32f2f', label: 'No MFA' },
-        { n: barWeak,  color: '#f57c00', label: 'Weak only (SMS/voice/email)' },
-        { n: barAuth,  color: '#fbc02d', label: 'Authenticator only' },
-        { n: barPhish, color: '#388e3c', label: 'Phishing-resistant' },
-    ];
-    if (barOther > 0) segments.push({ n: barOther, color: '#9e9e9e', label: 'Other MFA' });
-    const bar = document.getElementById('mfaBar');
-    document.getElementById('mfaBarLabel').textContent = 'MFA method distribution — all enabled accounts (' + total + ')';
-    bar.innerHTML = segments.filter(s => s.n > 0).map(s =>
-        '<div class="mfa-bar-segment" style="width:' + pct(s.n) + '%;background:' + s.color + '" title="' + s.label + ': ' + s.n + '"></div>'
-    ).join('');
-    document.getElementById('mfaBarLegend').innerHTML = segments.filter(s => s.n > 0).map(s =>
-        '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + s.label + ': <strong>' + s.n + '</strong></span>'
-    ).join('');
-
-    // Mini card helper — val is X, total is N, renders X<small> / N</small>
-    // Colours are applied as inline styles based on card type and count
-    const mcStyles = {
-        noMfa:  n => n > 0 ? { bg: '#ffebee', fg: '#c62828' } : { bg: '#e8f5e9', fg: '#388e3c' },
-        weak:   n => n > 0 ? { bg: '#fff3e0', fg: '#f57c00' } : { bg: '#e8f5e9', fg: '#388e3c' },
-        phish:  _  => ({ bg: '#e3f2fd', fg: '#1565c0' })
-    };
-    const mc = (val, total, lbl, s) => '<div class="summary-mini-card" style="background:' + s.bg + '"><div class="smc-value" style="color:' + s.fg + '">' + val + '<span style="font-size:0.58em;font-weight:400;color:#888"> / ' + total + '</span></div><div class="smc-label">' + lbl + '</div></div>';
-
-    // Admins column
-    const aNoMFA = admins.filter(r => r.mfaStatus === 'Disabled').length;
-    const aWeak  = admins.filter(r => r.mfaStatus === 'Enabled' && hasWeakMeth(r.mfaMethods)).length;
-    const aPhish = admins.filter(r => r.mfaStatus === 'Enabled' && isPhishRes(r.mfaMethods)).length;
-    document.getElementById('adminColHeader').innerHTML = '&#128737; Admins (' + admins.length + ' accounts)';
-    document.getElementById('adminCards').innerHTML =
-        mc(aNoMFA, admins.length, 'Without MFA',        mcStyles.noMfa(aNoMFA)) +
-        mc(aWeak,  admins.length, 'Weak MFA',            mcStyles.weak(aWeak)) +
-        mc(aPhish, admins.length, 'Phishing-resistant',  mcStyles.phish());
-
-    // Members column
-    const mNoMFA = members.filter(r => r.mfaStatus === 'Disabled').length;
-    const mWeak  = members.filter(r => r.mfaStatus === 'Enabled' && hasWeakMeth(r.mfaMethods)).length;
-    const mPhish = members.filter(r => r.mfaStatus === 'Enabled' && isPhishRes(r.mfaMethods)).length;
-    document.getElementById('memberColHeader').innerHTML = '&#128101; Members (' + members.length + ' enabled)';
-    document.getElementById('memberCards').innerHTML =
-        mc(mNoMFA, members.length, 'Without MFA',        mcStyles.noMfa(mNoMFA)) +
-        mc(mWeak,  members.length, 'Weak MFA',            mcStyles.weak(mWeak)) +
-        mc(mPhish, members.length, 'Phishing-resistant',  mcStyles.phish());
-
-    // Footer: inline guest summary
-    const gNoMFA = guests.filter(r => r.mfaStatus === 'Disabled').length;
-    const gWeak  = guests.filter(r => r.mfaStatus === 'Enabled' && hasWeakMeth(r.mfaMethods)).length;
-    const gMFA   = guests.filter(r => r.mfaStatus === 'Enabled').length;
-    const gText  = 'Guests (' + guests.length + '): ' +
-        gNoMFA + ' without MFA \xb7 ' + gWeak + ' weak MFA \xb7 ' + gMFA + ' with MFA';
-    document.getElementById('summaryFooter').innerHTML = '<span>' + gText + '</span>';
-
-    // Pie chart helper — draws SVG arc sectors from DATA
-    function drawPie(svgId, legendId, segs) {
-        const svgEl = document.getElementById(svgId);
-        const lgdEl = document.getElementById(legendId);
-        const tot = segs.reduce(function(s, d) { return s + d.v; }, 0);
-        if (!svgEl || !lgdEl || tot === 0) return;
-        let ang = -Math.PI / 2, paths = '', lgd = '';
-        segs.forEach(function(s) {
-            const frac = s.v / tot;
-            const end = ang + frac * 2 * Math.PI;
-            if (frac >= 0.9999) {
-                paths += '<circle cx="0" cy="0" r="1" fill="' + s.c + '"/>';
-            } else {
-                const la = frac > 0.5 ? 1 : 0;
-                const x1 = Math.cos(ang).toFixed(5), y1 = Math.sin(ang).toFixed(5);
-                const x2 = Math.cos(end).toFixed(5),  y2 = Math.sin(end).toFixed(5);
-                paths += '<path d="M0,0 L' + x1 + ',' + y1 + ' A1,1,0,' + la + ',1,' + x2 + ',' + y2 + ' Z" fill="' + s.c + '" stroke="white" stroke-width="0.03"/>';
-            }
-            lgd += '<div style="display:flex;align-items:center;gap:5px;font-size:0.78em;line-height:1.5">' +
-                   '<span style="width:10px;height:10px;border-radius:2px;background:' + s.c + ';flex-shrink:0;display:inline-block"></span>' +
-                   s.l + ': <strong>' + s.v + '</strong></div>';
-            ang = end;
-        });
-        svgEl.innerHTML = paths;
-        lgdEl.innerHTML = lgd;
-    }
-
-    // Risk pie
-    const rCounts = {};
-    DATA.forEach(r => { rCounts[r.riskLevel] = (rCounts[r.riskLevel] || 0) + 1; });
-    const rColors = { Critical:'#d32f2f', High:'#f57c00', Medium:'#fbc02d', Good:'#0097a7', Secure:'#388e3c' };
-    drawPie('riskPie', 'riskPieLegend',
-        ['Critical','High','Medium','Good','Secure'].filter(k => rCounts[k]).map(k => ({ l: k, v: rCounts[k], c: rColors[k] }))
-    );
-
-    // Phone countries pie
-    const phoneCounts = {};
-    DATA.forEach(r => {
-        if (r.phoneNumber) {
-            const cc = r.phoneNumber.match(/^(\+\d{1,3})/);
-            if (cc) { const k = cc[1]; phoneCounts[k] = (phoneCounts[k] || 0) + 1; }
-        }
-    });
-    const phoneColors = ['#1565c0','#0097a7','#6a1b9a','#2e7d32','#f57c00','#c62828','#455a64','#ad1457'];
-    const phoneSegs = Object.entries(phoneCounts).sort((a, b) => b[1] - a[1])
-        .map(function(e, i) { return { l: e[0], v: e[1], c: phoneColors[i % phoneColors.length] }; });
-    drawPie('phonePie', 'phonePieLegend', phoneSegs);
-}
-
 function resetFilters() {
     document.getElementById('searchBox').value = '';
     document.getElementById('filterRisk').value = '';
@@ -1069,7 +831,6 @@ function resetFilters() {
 document.getElementById('searchBox').addEventListener('input', renderTable);
 document.querySelectorAll('.filters select').forEach(s => s.addEventListener('change', renderTable));
 renderTable();
-renderSummary();
 </script>
 </body>
 </html>
@@ -1592,34 +1353,6 @@ try {
     $guestAccounts = $export | Where-Object { $_.usertype -eq 'Guest' }
     $adminAccounts = $export | Where-Object { $_.isAdmin }
 
-    # MFA quality breakdown
-    # Weak               = has SMS/voice or email registered (regardless of other methods)
-    # Phishing-resistant = has at least one of FIDO2, Windows Hello, Passwordless
-    $membersWeakMFA          = ($enabledMemberAccounts | Where-Object {
-        $_.MFAstatus -eq 'enabled' -and
-        ($_.phoneSMS -or $_.emailAuth)
-    }).Count
-    $membersPhishingResistant = ($enabledMemberAccounts | Where-Object {
-        $_.fido -or $_.helloForBusiness -or $_.passwordLess
-    }).Count
-    $membersNoMFA             = ($enabledMemberAccounts | Where-Object { $_.MFAstatus -eq 'disabled' }).Count
-    $guestsNoMFA              = ($guestAccounts | Where-Object { $_.MFAstatus -eq 'disabled' }).Count
-    $guestsWeakMFA            = ($guestAccounts | Where-Object {
-        $_.MFAstatus -eq 'enabled' -and
-        ($_.phoneSMS -or $_.emailAuth)
-    }).Count
-    $enabledAdminAccounts     = $adminAccounts | Where-Object { $_.enabled -eq $true }
-    $adminTotal               = $adminAccounts.Count
-    $adminsNoMFA              = ($enabledAdminAccounts | Where-Object { $_.MFAstatus -eq 'disabled' }).Count
-    $adminsMFA                = ($enabledAdminAccounts | Where-Object { $_.MFAstatus -eq 'enabled' }).Count
-    $adminsWeakMFA            = ($enabledAdminAccounts | Where-Object {
-        $_.MFAstatus -eq 'enabled' -and
-        ($_.phoneSMS -or $_.emailAuth)
-    }).Count
-    $adminsPhishingResistant  = ($enabledAdminAccounts | Where-Object {
-        $_.fido -or $_.helloForBusiness -or $_.passwordLess
-    }).Count
-
     Write-Host ("=" * 80) -ForegroundColor Green
     Write-Host "Entra ID MFA Report - Generated: $date" -ForegroundColor Green
     Write-Host ("=" * 80) -ForegroundColor Green
@@ -1628,8 +1361,6 @@ try {
     Write-Host "  Enabled user accounts (Members):   $enabledMemberCount" -ForegroundColor White
     Write-Host "  Disabled accounts:                 $disabledCount" -ForegroundColor White
     Write-Host "  MFA coverage - enabled members:    ${mfaPctMembers}%  ($mfaEnabledMembers / $enabledMemberCount)" -ForegroundColor Cyan
-    Write-Host "    Weak MFA (SMS/voice/email only):           $membersWeakMFA" -ForegroundColor Yellow
-    Write-Host "    Phishing-resistant MFA (FIDO2/Hello/PL):  $membersPhishingResistant" -ForegroundColor Green
 
     # --- USERS (Members, non-admin) ---
     Write-Host "`nUSERS (Members, non-admin):" -ForegroundColor Yellow
@@ -1741,14 +1472,9 @@ try {
         EnabledMemberAccounts   = $enabledMemberCount
         MFAEnabledMembers       = $mfaEnabledMembers
         MFAEnabledMembersPct    = $mfaPctMembers
-        MembersNoMFA            = $membersNoMFA
-        MembersWeakMFA          = $membersWeakMFA
-        MembersPhishingResistant = $membersPhishingResistant
         GuestAccounts           = $gTotal
         MFAEnabledGuests        = $gMfaOn
         MFAEnabledGuestsPct     = if ($gTotal -gt 0) { [math]::Round(($gMfaOn / $gTotal) * 100, 1) } else { 0 }
-        GuestsNoMFA             = $guestsNoMFA
-        GuestsWeakMFA           = $guestsWeakMFA
         DisabledAccounts        = $disabledCount
         RiskCritical            = $riskCritical
         RiskHigh                = $riskHigh
@@ -1756,11 +1482,7 @@ try {
         RiskGood                = $riskGood
         RiskSecure              = $riskSecure
         RiskNA                  = $riskNA
-        AdminCount              = $adminTotal
-        AdminsMFA               = $adminsMFA
-        AdminsNoMFA             = $adminsNoMFA
-        AdminsWeakMFA           = $adminsWeakMFA
-        AdminsPhishingResistant = $adminsPhishingResistant
+        AdminCount              = $adminAccounts.Count
         AdminsWithoutMFA        = $aMfaOffEnabled
         AppPasswordUsers        = $appPasswordUsers
     }
