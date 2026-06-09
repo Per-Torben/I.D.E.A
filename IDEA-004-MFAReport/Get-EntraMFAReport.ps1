@@ -18,10 +18,10 @@
        - No MFA (red)            : Account is enabled but has no MFA method registered.
        - Weak only (orange)      : Has SMS, voice call, or email OTP registered, but no
                                    Authenticator app and no phishing-resistant method.
-       - Authenticator only (amber): Has the Microsoft Authenticator app registered, but
-                                   no phishing-resistant method.
-       - Phishing-resistant (green): Has at least one of FIDO2 security key, Windows Hello
-                                   for Business, or Passwordless phone sign-in registered.
+       - Authenticator only (amber): Has the Microsoft Authenticator app or Passwordless
+                                   phone sign-in registered, but no phishing-resistant method.
+       - Phishing-resistant (green): Has at least one of FIDO2 security key or Windows Hello
+                                   for Business registered.
 
        Note: Categories are mutually exclusive. A user with both Authenticator and FIDO2
        is counted only in the Phishing-resistant segment.
@@ -43,7 +43,7 @@
                               Card is orange if count > 0, green if 0. Note: a user with both
                               FIDO2 and SMS counts here, because the weak method can still be
                               targeted by attackers (SIM swap, SS7 interception, email phishing).
-       - Phishing-resistant : Has FIDO2, Windows Hello for Business, or Passwordless registered.
+       - Phishing-resistant : Has FIDO2 or Windows Hello for Business registered.
                               Always blue. Counts users who have at least one strong method,
                               even if they also have weaker methods registered alongside it.
 
@@ -61,7 +61,7 @@
        - Medium   : Has MFA (e.g. Authenticator, Software OATH, email OTP) but no phishing-
                     resistant method. Vulnerable to real-time phishing proxies (AiTM) that
                     can intercept push approvals or TOTP codes.
-       - Good     : Has at least one phishing-resistant method (FIDO2, Hello, Passwordless)
+       - Good     : Has at least one phishing-resistant method (FIDO2, Hello)
                     but also has weaker methods registered alongside it. The weak methods
                     represent residual attack surface that could be exploited as fallback.
        - Secure   : All registered MFA methods are phishing-resistant. No weak fallback
@@ -78,6 +78,11 @@
 
 .PARAMETER LogDirectory
     Directory path for log files. Defaults to .\Logs
+
+.PARAMETER DiagnosticMode
+    Enables transcript logging and verbose output for troubleshooting permission
+    and consent issues. The transcript captures all output (survives Clear-Host)
+    to a file in LogDirectory.
 
 .EXAMPLE
     .\Get-EntraMFAReport.ps1
@@ -144,7 +149,7 @@
                        - Redesigned HTML dashboard: MFA distribution bar, admin/member/guest
                          stat cards with X/N fractions, risk and phone pie charts
                        - MFA strength model: No MFA / Weak (SMS+voice+email) /
-                         Phishing-resistant (FIDO2+Hello+Passwordless)
+                         Phishing-resistant (FIDO2+Hello); Passwordless moved to Authenticator tier
                        - All dashboard stats computed from DATA array at runtime (JS)
 
     DATA PRIVACY / GDPR NOTICE:
@@ -411,8 +416,7 @@ function Connect-Graph {
         "User.Read.All",
         "Directory.Read.All",
         "UserAuthenticationMethod.Read.All",
-        "AuditLog.Read.All",
-        "Reports.Read.All"
+        "AuditLog.Read.All"
     )
 
     Write-Host ""
@@ -589,8 +593,8 @@ function New-HtmlReport {
     }
 
     $jsonData = $jsonRows | ConvertTo-Json -Depth 3 -Compress
-    # Escape for embedding in JS
-    $jsonData = $jsonData -replace '\\', '\\\\' -replace "'", "\'"
+    # Escape for embedding in JS (prevent XSS via </script> in user data)
+    $jsonData = $jsonData -replace '\\', '\\\\' -replace '</', '<\/' -replace "'", "\'"
 
     $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
@@ -927,8 +931,8 @@ function toggleSection(header) {
 }
 
 function renderSummary() {
-    const isPhishRes  = m => m.includes('FIDO2') || m.includes('Windows Hello') || m.includes('Passwordless');
-    const hasAuthApp  = m => m.includes('Authenticator');
+    const isPhishRes  = m => m.includes('FIDO2') || m.includes('Windows Hello');
+    const hasAuthApp  = m => m.includes('Authenticator') || m.includes('Passwordless');
     const hasWeakMeth = m => m.includes('Phone/SMS') || m.includes('Email');
     const isWeakOnly  = m => hasWeakMeth(m) && !isPhishRes(m) && !hasAuthApp(m);
     const isAuthOnly  = m => hasAuthApp(m) && !isPhishRes(m);
@@ -1468,15 +1472,16 @@ try {
                 $output.RiskLevel = "Medium"
                 $output.RiskNotes = "No phishing-resistant method"
             }
-            elseif ($output.phoneSMS -or $output.emailAuth -or $output.softwareAuth -or $output.authApp) {
-                # Has phishing-resistant but also weak methods registered
+            elseif ($output.phoneSMS -or $output.emailAuth -or $output.softwareAuth -or $output.authApp -or $output.passwordLess) {
+                # Has phishing-resistant but also non-phishing-resistant methods registered
                 $weakMethods = @()
                 if ($output.phoneSMS) { $weakMethods += "Phone/SMS" }
                 if ($output.emailAuth) { $weakMethods += "Email" }
                 if ($output.softwareAuth) { $weakMethods += "Software OATH" }
                 if ($output.authApp) { $weakMethods += "Authenticator" }
+                if ($output.passwordLess) { $weakMethods += "Passwordless" }
                 $output.RiskLevel = "Good"
-                $output.RiskNotes = "Phishing-resistant + weak methods: $($weakMethods -join ', ')"
+                $output.RiskNotes = "Phishing-resistant + non-phishing-resistant methods: $($weakMethods -join ', ')"
             }
             else {
                 $output.RiskLevel = "Secure"
@@ -1594,13 +1599,14 @@ try {
 
     # MFA quality breakdown
     # Weak               = has SMS/voice or email registered (regardless of other methods)
-    # Phishing-resistant = has at least one of FIDO2, Windows Hello, Passwordless
+    # Phishing-resistant = has at least one of FIDO2 or Windows Hello for Business
+    #                      Note: Passwordless phone sign-in is NOT phishing-resistant (AiTM vulnerable)
     $membersWeakMFA          = ($enabledMemberAccounts | Where-Object {
         $_.MFAstatus -eq 'enabled' -and
         ($_.phoneSMS -or $_.emailAuth)
     }).Count
     $membersPhishingResistant = ($enabledMemberAccounts | Where-Object {
-        $_.fido -or $_.helloForBusiness -or $_.passwordLess
+        $_.fido -or $_.helloForBusiness
     }).Count
     $membersNoMFA             = ($enabledMemberAccounts | Where-Object { $_.MFAstatus -eq 'disabled' }).Count
     $guestsNoMFA              = ($guestAccounts | Where-Object { $_.MFAstatus -eq 'disabled' }).Count
@@ -1617,7 +1623,7 @@ try {
         ($_.phoneSMS -or $_.emailAuth)
     }).Count
     $adminsPhishingResistant  = ($enabledAdminAccounts | Where-Object {
-        $_.fido -or $_.helloForBusiness -or $_.passwordLess
+        $_.fido -or $_.helloForBusiness
     }).Count
 
     Write-Host ("=" * 80) -ForegroundColor Green

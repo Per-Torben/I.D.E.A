@@ -81,18 +81,21 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 ---
 
 ### [I.D.E.A. 004 – Comprehensive MFA Report](IDEA-004-MFAReport/)
-Generates a detailed Multi-Factor Authentication status report for all accounts in a Microsoft Entra ID tenant, with interactive HTML output for sorting, filtering, and risk analysis.
+Interactive, menu-driven MFA report tool that generates a detailed Multi-Factor Authentication status report for all accounts in a Microsoft Entra ID tenant, with an interactive HTML dashboard for sorting, filtering, and risk analysis.
 
 **Key Capabilities**
+- Interactive menu: connect to Graph/Exchange Online, choose output format (HTML, CSV, console)
 - Analyzes MFA status and authentication methods for every user in the tenant
 - Detects all MFA methods: Authenticator, Phone/SMS, FIDO2, Windows Hello, Passwordless, Software OATH, Email, TAP
-- Classifies accounts by category: User, Room, Shared Mailbox, Equipment
-- Risk level scoring: Critical (no MFA) → High (SMS-only) → Medium (no phishing-resistant) → Low (FIDO2/Hello)
+- Account categorization via Exchange Online RecipientTypeDetails: User, Room, Shared Mailbox, Equipment
+- Risk level scoring: Critical (no MFA) → High (SMS-only) → Medium (no phishing-resistant) → Good (phishing-resistant + weak fallbacks) → Secure (all phishing-resistant)
+- MFA strength model: Phishing-resistant (FIDO2/Windows Hello only) · Authenticator tier (Authenticator app + Passwordless phone sign-in) · Weak (SMS/voice/email)
+- Note: Passwordless phone sign-in is correctly classified as NOT phishing-resistant (AiTM vulnerable)
+- HTML dashboard: MFA distribution bar, admin/member stat cards, risk pie chart, phone country chart
 - Admin role detection, license status, and last sign-in activity
-- Self-contained interactive HTML report — works offline, no external dependencies
-- HTML features: column sorting, dropdown filters, text search, MFA method chip filters
-- CSV export (detailed user data + summary statistics)
-- Console summary with risk breakdown and method distribution
+- Self-contained HTML report — works offline, auto-opens in Edge
+- HTML features: column sorting, dropdown filters, text search, MFA method chip filters with AND/OR logic
+- Diagnostic mode (`-DiagnosticMode`) for troubleshooting permission/consent issues
 
 **Use Case:** Provides security teams and administrators a comprehensive view of MFA adoption across the tenant, enabling them to identify high-risk accounts, prioritize remediation, and track MFA rollout progress. The HTML report enables non-technical stakeholders to explore data independently.
 
@@ -108,7 +111,8 @@ Generates a detailed Multi-Factor Authentication status report for all accounts 
 
 ## Prerequisites
 - PowerShell 7.0 or later  
-- Microsoft Graph PowerShell SDK  
+- Microsoft Graph PowerShell SDK
+- Exchange Online Management Powershell Module
 - Appropriate permissions in Microsoft Entra ID  
 
 ## Contributing
