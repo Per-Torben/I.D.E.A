@@ -303,6 +303,26 @@ function Get-CountryFromPhone {
     return "Unknown (+$($digits.Substring(0, [Math]::Min(3, $digits.Length)))...)"
 }
 
+function Get-SmsVoiceRetirementAdvisory {
+    param([int]$Count)
+
+    if ($Count -le 0) { return $null }
+
+    $retirementDate = '2027-02-01'
+    $learnMoreUrl = 'https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement#5-after-retirement'
+    $blogUrl = 'https://agderinthe.cloud/2026/08/03/yet-another-deadline-and-this-one-waited-for-my-vacation/'
+    $accountLabel = if ($Count -eq 1) { 'account' } else { 'accounts' }
+
+    [pscustomobject]@{
+        Count          = $Count
+        RetirementDate = $retirementDate
+        Headline       = 'SMS/voice-only MFA retirement notice'
+        Summary        = "$Count $accountLabel rely on SMS or voice call MFA and must register another MFA method before $retirementDate."
+        LearnMoreUrl   = $learnMoreUrl
+        BlogUrl        = $blogUrl
+    }
+}
+
 # ============================================================================
 # Menu Functions
 # ============================================================================
@@ -562,14 +582,50 @@ function New-HtmlReport {
     # Build JSON data for the table
     $jsonRows = $UserData | ForEach-Object {
         $methods = @()
-        if ($_.authApp) { $methods += 'Authenticator' }
-        if ($_.phoneSMS) { $methods += 'Phone/SMS' }
-        if ($_.fido) { $methods += 'FIDO2' }
-        if ($_.helloForBusiness) { $methods += 'Windows Hello' }
-        if ($_.passwordLess) { $methods += 'Passwordless' }
-        if ($_.softwareAuth) { $methods += 'Software OATH' }
-        if ($_.emailAuth) { $methods += 'Email' }
-        if ($_.tempPass) { $methods += 'TAP' }
+        $methodTags = @()
+        if ($_.authApp) {
+            $methods += 'Authenticator'
+            $methodTags += 'Authenticator'
+        }
+        if ($_.phoneSMS) {
+            $phoneTag = switch ($_.phoneType) {
+                'office' { 'Voice' }
+                'mobile' { 'SMS' }
+                'alternateMobile' { 'SMS' }
+                default { 'SMS/Voice' }
+            }
+            $methods += $phoneTag
+            if ($phoneTag -eq 'SMS/Voice') {
+                $methodTags += @('SMS', 'Voice')
+            }
+            else {
+                $methodTags += $phoneTag
+            }
+        }
+        if ($_.fido) {
+            $methods += 'FIDO2'
+            $methodTags += 'FIDO2'
+        }
+        if ($_.helloForBusiness) {
+            $methods += 'Windows Hello'
+            $methodTags += 'Windows Hello'
+        }
+        if ($_.passwordLess) {
+            $methods += 'Passwordless'
+            $methodTags += 'Passwordless'
+        }
+        if ($_.softwareAuth) {
+            $methods += 'Software OATH'
+            $methodTags += 'Software OATH'
+        }
+        if ($_.emailAuth) {
+            $methods += 'Email'
+            $methodTags += 'Email'
+        }
+        if ($_.tempPass) {
+            $methods += 'TAP'
+            $methodTags += 'TAP'
+        }
         $methodStr = if ($methods.Count -gt 0) { $methods -join ', ' } else { '-' }
 
         $phoneStr = if ($_.phoneNumber -and $_.phoneNumber -ne $false) { $_.phoneNumber } else { '' }
@@ -583,6 +639,7 @@ function New-HtmlReport {
             accountStatus   = if ($_.enabled) { 'Enabled' } else { 'Disabled' }
             mfaStatus       = switch ($_.MFAstatus) { 'enabled' { 'Enabled' } 'disabled' { 'Disabled' } default { 'Unknown' } }
             mfaMethods      = $methodStr
+            methodTags      = $methodTags
             phoneNumber     = $phoneStr
             isAdmin         = if ($_.isAdmin) { 'Yes' } else { 'No' }
             licensed        = if ($_.licensed) { 'Yes' } else { 'No' }
@@ -597,6 +654,23 @@ function New-HtmlReport {
     $jsonData = $jsonData -replace '\\', '\\\\' -replace '</', '<\/' -replace "'", "\'"
 
     $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$smsVoiceOnlyCount = ($export | Where-Object { $_.RiskLevel -eq 'High' -and $_.RiskNotes -like 'SMS/voice-only MFA*' }).Count
+$smsVoiceAdvisory = Get-SmsVoiceRetirementAdvisory -Count $smsVoiceOnlyCount
+$smsVoiceAdvisoryHtml = if ($smsVoiceAdvisory) {
+@"
+<div class="retirement-notice">
+    <div class="retirement-icon">&#9888;</div>
+    <div class="retirement-copy">
+        <strong>$($smsVoiceAdvisory.Headline)</strong>
+        <div>$($smsVoiceAdvisory.Summary)</div>
+        <div class="retirement-links">
+            <a href="$($smsVoiceAdvisory.LearnMoreUrl)" target="_blank" rel="noopener noreferrer">Microsoft retirement notice</a>
+            <a href="$($smsVoiceAdvisory.BlogUrl)" target="_blank" rel="noopener noreferrer">Background read</a>
+        </div>
+    </div>
+</div>
+"@
+} else { '' }
 
     $html = @"
 <!DOCTYPE html>
@@ -633,6 +707,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .method-logic-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; padding: 4px 10px; background: #f5f5f5; border-radius: 16px; font-size: 0.75em; font-weight: 600; border: 1px solid #ddd; }
 .method-logic-toggle span { padding: 2px 8px; border-radius: 10px; cursor: pointer; color: #777; }
 .method-logic-toggle span.active { background: #1565c0; color: white; }
+.method-logic-toggle span.disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+.method-only-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 0.78em; color: #555; }
+.method-only-toggle input { accent-color: #1565c0; cursor: pointer; }
 .method-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: #e3f2fd; border-radius: 16px; font-size: 0.8em; cursor: pointer; user-select: none; border: 1px solid #bbdefb; }
 .method-chip.active { background: #1565c0; color: white; border-color: #1565c0; }
 .btn-reset { padding: 8px 16px; background: #e0e0e0; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
@@ -666,11 +743,17 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge-guest { background: #e3f2fd; color: #1565c0; }
 .badge-member { background: #f3e5f5; color: #6a1b9a; }
 .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #999; }
-.pii-notice { background: #fff8e1; border: 1px solid #f9a825; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #5d4037; display: flex; align-items: flex-start; gap: 12px; }
-.pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; }
-.pii-notice .pii-text strong { display: block; margin-bottom: 4px; color: #e65100; }
+.pii-notice { background: #e8f4fd; border: 1px solid #4f83cc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #17324d; display: flex; align-items: flex-start; gap: 12px; }
+.pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; color: #1565c0; }
+.pii-notice .pii-text strong { display: block; margin-bottom: 4px; color: #0d47a1; }
 .pii-notice .pii-dismiss { margin-left: auto; cursor: pointer; font-size: 1.1em; color: #999; flex-shrink: 0; padding: 0 4px; }
 .pii-notice .pii-dismiss:hover { color: #333; }
+.retirement-notice { background: #fff1f0; border: 1px solid #d84315; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.88em; color: #5f2120; display: flex; align-items: flex-start; gap: 12px; }
+.retirement-notice .retirement-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; color: #c62828; }
+.retirement-notice .retirement-copy strong { display: block; margin-bottom: 4px; color: #b71c1c; }
+.retirement-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+.retirement-links a { color: #0d47a1; font-weight: 600; text-decoration: none; }
+.retirement-links a:hover { text-decoration: underline; }
 @media (max-width: 768px) { .filter-row { flex-direction: column; } .filter-group select, .filter-group input { min-width: 100%; } }
 .summary-block { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
 .mfa-bar-track { display: flex; height: 28px; border-radius: 6px; overflow: hidden; margin-bottom: 10px; background: #eee; }
@@ -710,6 +793,8 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
   </div>
   <span class="pii-dismiss" onclick="document.getElementById('piiNotice').style.display='none'" title="Dismiss">&#x2715;</span>
 </div>
+
+$smsVoiceAdvisoryHtml
 
 <div class="summary-block" id="summaryBlock">
   <div id="mfaBarLabel" class="summary-col-header" style="margin-bottom:8px;"></div>
@@ -764,7 +849,8 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 <div class="method-filters">
 <label>MFA Methods:</label>
 <span class="method-chip" data-method="Authenticator" onclick="toggleMethod(this)">Authenticator</span>
-<span class="method-chip" data-method="Phone/SMS" onclick="toggleMethod(this)">Phone/SMS</span>
+<span class="method-chip" data-method="SMS" onclick="toggleMethod(this)">SMS</span>
+<span class="method-chip" data-method="Voice" onclick="toggleMethod(this)">Voice</span>
 <span class="method-chip" data-method="FIDO2" onclick="toggleMethod(this)">FIDO2</span>
 <span class="method-chip" data-method="Windows Hello" onclick="toggleMethod(this)">Windows Hello</span>
 <span class="method-chip" data-method="Passwordless" onclick="toggleMethod(this)">Passwordless</span>
@@ -772,6 +858,7 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 <span class="method-chip" data-method="Email" onclick="toggleMethod(this)">Email</span>
 <span class="method-chip" data-method="TAP" onclick="toggleMethod(this)">TAP</span>
 <div class="method-logic-toggle"><span id="modeOr" class="active" onclick="setMethodMode('or')">OR</span><span id="modeAnd" onclick="setMethodMode('and')">AND</span></div>
+<label class="method-only-toggle"><input type="checkbox" id="filterOnlySelectedMethods">Only selected methods</label>
 </div>
 </div>
 
@@ -810,6 +897,7 @@ let sortCol = 'riskLevel';
 let sortDir = 'asc';
 let activeMethodFilters = [];
 let methodFilterMode = 'or';
+let onlySelectedMethods = false;
 const riskOrder = {Critical:0, High:1, Medium:2, Good:3, Secure:4, 'N/A':5};
 
 function getRiskClass(r) { return 'risk-' + (r === 'N/A' ? 'na' : r.toLowerCase()); }
@@ -854,11 +942,14 @@ function renderTable() {
             }
         }
         if (activeMethodFilters.length > 0) {
-            const userMethods = r.mfaMethods.toLowerCase();
+            const userMethods = Array.isArray(r.methodTags) ? r.methodTags : [];
+            if (onlySelectedMethods) {
+                if (!userMethods.every(m => activeMethodFilters.includes(m))) return false;
+            }
             if (methodFilterMode === 'and') {
-                if (!activeMethodFilters.every(m => userMethods.includes(m.toLowerCase()))) return false;
+                if (!activeMethodFilters.every(m => userMethods.includes(m))) return false;
             } else {
-                if (!activeMethodFilters.some(m => userMethods.includes(m.toLowerCase()))) return false;
+                if (!activeMethodFilters.some(m => userMethods.includes(m))) return false;
             }
         }
         return true;
@@ -914,14 +1005,31 @@ function toggleMethod(el) {
     el.classList.toggle('active');
     if (el.classList.contains('active')) { activeMethodFilters.push(m); }
     else { activeMethodFilters = activeMethodFilters.filter(x => x !== m); }
+    updateMethodModeToggle();
     renderTable();
 }
 
 function setMethodMode(mode) {
+    if (activeMethodFilters.length < 2) { return; }
     methodFilterMode = mode;
     document.getElementById('modeOr').classList.toggle('active', mode === 'or');
     document.getElementById('modeAnd').classList.toggle('active', mode === 'and');
     renderTable();
+}
+
+function updateMethodModeToggle() {
+    const allowMultiMode = activeMethodFilters.length >= 2;
+    const modeOrEl = document.getElementById('modeOr');
+    const modeAndEl = document.getElementById('modeAnd');
+
+    modeOrEl.classList.toggle('disabled', !allowMultiMode);
+    modeAndEl.classList.toggle('disabled', !allowMultiMode);
+
+    if (!allowMultiMode) {
+        methodFilterMode = 'or';
+        modeOrEl.classList.add('active');
+        modeAndEl.classList.remove('active');
+    }
 }
 
 function toggleSection(header) {
@@ -933,7 +1041,7 @@ function toggleSection(header) {
 function renderSummary() {
     const isPhishRes  = m => m.includes('FIDO2') || m.includes('Windows Hello');
     const hasAuthApp  = m => m.includes('Authenticator') || m.includes('Passwordless');
-    const hasWeakMeth = m => m.includes('Phone/SMS') || m.includes('Email');
+    const hasWeakMeth = m => m.includes('SMS') || m.includes('Voice') || m.includes('Email');
     const isWeakOnly  = m => hasWeakMeth(m) && !isPhishRes(m) && !hasAuthApp(m);
     const isAuthOnly  = m => hasAuthApp(m) && !isPhishRes(m);
 
@@ -1062,16 +1170,24 @@ function resetFilters() {
     document.getElementById('filterAdmin').value = '';
     document.getElementById('filterLicensed').value = '';
     document.getElementById('filterSignIn').value = '';
+    document.getElementById('filterOnlySelectedMethods').checked = false;
     activeMethodFilters = [];
     methodFilterMode = 'or';
+    onlySelectedMethods = false;
     document.getElementById('modeOr').classList.add('active');
     document.getElementById('modeAnd').classList.remove('active');
     document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
+    updateMethodModeToggle();
     renderTable();
 }
 
 document.getElementById('searchBox').addEventListener('input', renderTable);
 document.querySelectorAll('.filters select').forEach(s => s.addEventListener('change', renderTable));
+document.getElementById('filterOnlySelectedMethods').addEventListener('change', function(e) {
+    onlySelectedMethods = e.target.checked;
+    renderTable();
+});
+updateMethodModeToggle();
 renderTable();
 renderSummary();
 </script>
@@ -1392,6 +1508,7 @@ try {
                 appPassword       = $false
                 authDevice        = $false
                 authPhoneNr       = $false
+                phoneType         = $false
                 phoneNumber       = $false
                 SSPREmail         = $false
                 isAdmin           = $isAdmin
@@ -1413,6 +1530,7 @@ try {
                         $phoneType = $method.AdditionalProperties["phoneType"]
                         $phoneNum = $method.AdditionalProperties["phoneNumber"]
                         $output.authPhoneNr = "$phoneType $phoneNum"
+                        $output.phoneType = $phoneType
                         $output.phoneNumber = $phoneNum
                         $output.MFAstatus = "enabled"
                     }
@@ -1466,7 +1584,7 @@ try {
             }
             elseif ($output.phoneSMS -and -not $output.authApp -and -not $output.fido -and -not $output.helloForBusiness -and -not $output.passwordLess -and -not $output.softwareAuth) {
                 $output.RiskLevel = "High"
-                $output.RiskNotes = "SMS-only (SIM-swap vulnerable)"
+                $output.RiskNotes = "SMS/voice-only MFA (SIM-swap vulnerable; retires 2027-02-01)"
             }
             elseif (-not $output.fido -and -not $output.helloForBusiness) {
                 $output.RiskLevel = "Medium"
@@ -1475,7 +1593,7 @@ try {
             elseif ($output.phoneSMS -or $output.emailAuth -or $output.softwareAuth -or $output.authApp -or $output.passwordLess) {
                 # Has phishing-resistant but also non-phishing-resistant methods registered
                 $weakMethods = @()
-                if ($output.phoneSMS) { $weakMethods += "Phone/SMS" }
+                if ($output.phoneSMS) { $weakMethods += "SMS/Voice" }
                 if ($output.emailAuth) { $weakMethods += "Email" }
                 if ($output.softwareAuth) { $weakMethods += "Software OATH" }
                 if ($output.authApp) { $weakMethods += "Authenticator" }
@@ -1637,6 +1755,13 @@ try {
     Write-Host "    Weak MFA (SMS/voice/email only):           $membersWeakMFA" -ForegroundColor Yellow
     Write-Host "    Phishing-resistant MFA (FIDO2/Hello/PL):  $membersPhishingResistant" -ForegroundColor Green
 
+    if ($smsVoiceAdvisory) {
+        Write-Host "`nSMS/VOICE MFA RETIREMENT NOTICE:" -ForegroundColor DarkYellow
+        Write-Host "  $($smsVoiceAdvisory.Summary)" -ForegroundColor DarkYellow
+        Write-Host "  Microsoft: $($smsVoiceAdvisory.LearnMoreUrl)" -ForegroundColor Yellow
+        Write-Host "  Background: $($smsVoiceAdvisory.BlogUrl)" -ForegroundColor Yellow
+    }
+
     # --- USERS (Members, non-admin) ---
     Write-Host "`nUSERS (Members, non-admin):" -ForegroundColor Yellow
     $mEnabled = ($memberAccounts | Where-Object { $_.enabled }).Count
@@ -1685,7 +1810,7 @@ try {
     $riskSecure = ($export | Where-Object { $_.RiskLevel -eq "Secure" }).Count
     $riskNA = ($export | Where-Object { $_.RiskLevel -eq "N/A" }).Count
     Write-Host "  Critical (No MFA): $riskCritical" -ForegroundColor Red
-    Write-Host "  High (SMS-only): $riskHigh" -ForegroundColor DarkYellow
+    Write-Host "  High (SMS/voice-only): $riskHigh" -ForegroundColor DarkYellow
     Write-Host "  Medium (No phishing-resistant): $riskMedium" -ForegroundColor Yellow
     Write-Host "  Good (Has phishing-resistant + weak methods): $riskGood" -ForegroundColor Cyan
     Write-Host "  Secure (All methods phishing-resistant): $riskSecure" -ForegroundColor Green
@@ -1698,7 +1823,7 @@ try {
         $mc = $mfaUsers.Count
         $methodStats = @(
             @{ Name = 'Authenticator App'; Count = ($mfaUsers | Where-Object { $_.authApp }).Count },
-            @{ Name = 'Phone/SMS'; Count = ($mfaUsers | Where-Object { $_.phoneSMS }).Count },
+            @{ Name = 'SMS/Voice'; Count = ($mfaUsers | Where-Object { $_.phoneSMS }).Count },
             @{ Name = 'FIDO2'; Count = ($mfaUsers | Where-Object { $_.fido }).Count },
             @{ Name = 'Windows Hello'; Count = ($mfaUsers | Where-Object { $_.helloForBusiness }).Count },
             @{ Name = 'Passwordless'; Count = ($mfaUsers | Where-Object { $_.passwordLess }).Count },
@@ -1858,6 +1983,8 @@ try {
     }
 
     Write-Log "MFA Report generation completed successfully" -Level "SUCCESS"
+    Write-Host "" 
+    Read-Host "  Press Enter to return to the menu"
 }
 catch {
     Write-Log "Error during script execution: $($_.Exception.Message)" -Level "ERROR"
