@@ -10,7 +10,7 @@ Interactive menu-driven MFA analysis with multiple output formats.
 
 ## Features
 - **Interactive menu**: Connect to services and choose output format from an in-script menu
-- **Full MFA method detection**: Authenticator App, Phone/SMS, FIDO2, Windows Hello for Business, Passwordless phone sign-in, Software OATH, Email, Temporary Access Pass
+- **Full MFA method detection**: Authenticator App, SMS, Voice, FIDO2, Windows Hello for Business, Passwordless phone sign-in, Software OATH, Email, Temporary Access Pass
 - **Account categorization**: User, Room, Shared Mailbox, Equipment (detected via Exchange Online RecipientTypeDetails)
 - **Risk level scoring** (5-tier model):
   - **Critical**: Enabled account with no MFA registered
@@ -22,7 +22,7 @@ Interactive menu-driven MFA analysis with multiple output formats.
 - **MFA strength classification**:
   - **Phishing-resistant**: FIDO2 security key, Windows Hello for Business (origin-bound credentials)
   - **Authenticator tier**: Microsoft Authenticator app, Passwordless phone sign-in (AiTM vulnerable)
-  - **Weak**: Phone/SMS, voice call, email OTP (SIM-swap/interception vulnerable)
+  - **Weak**: SMS, voice call, email OTP (SIM-swap/interception vulnerable)
   - Note: Passwordless phone sign-in is NOT phishing-resistant — it remains vulnerable to real-time phishing proxies (AiTM)
 - **HTML dashboard sections**:
   - MFA Method Distribution Bar (No MFA / Weak only / Authenticator only / Phishing-resistant)
@@ -36,11 +36,12 @@ Interactive menu-driven MFA analysis with multiple output formats.
   - Column sorting (click any header)
   - Dropdown filters: Risk Level, MFA Status, User Type, Account Category, Account Status, Admin, Licensed, Last Sign-In
   - Text search across Display Name and UPN
-  - MFA Method chip filters with Any selected / Only selected matching
+  - MFA Method chip filters with OR / AND matching for multi-method searches
+  - Separate `Only selected methods` option to exclude accounts that have methods outside the selected set
   - Retirement advisory banner with Microsoft guidance and background reading links for SMS/voice-only MFA
   - Color-coded risk indicators
 - **CSV export**: Semicolon-delimited detailed user data + summary statistics
-- **Console summary**: Risk breakdown, method distribution, admin/member/guest stats
+- **Console summary**: Risk breakdown, method distribution, admin/member/guest stats, and a pause before returning to the main menu
 
 ## Prerequisites
 - PowerShell 7.0+
@@ -128,7 +129,9 @@ The HTML report is a single self-contained file that works offline in any modern
 - Is Admin: Yes / No
 - Licensed: Yes / No
 - Last Sign-In: Active (30d) / Inactive 30+ days / Inactive 90+ days / Never
-- MFA Method chips: click to filter by specific methods (AND/OR mode toggle)
+- MFA Method chips: click to filter by specific methods
+- OR / AND mode toggle: enabled when 2 or more methods are selected
+- Only selected methods: limits results to accounts whose registered methods are all within the selected set
 
 **Table**: Sortable columns, color-coded risk levels, responsive layout.
 
