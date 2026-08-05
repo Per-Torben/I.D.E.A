@@ -14,7 +14,7 @@ Interactive menu-driven MFA analysis with multiple output formats.
 - **Account categorization**: User, Room, Shared Mailbox, Equipment (detected via Exchange Online RecipientTypeDetails)
 - **Risk level scoring** (5-tier model):
   - **Critical**: Enabled account with no MFA registered
-  - **High**: SMS-only MFA (SIM-swap vulnerable)
+  - **High**: SMS/voice-only MFA (SIM-swap vulnerable; retirement advisory banner for Feb 1, 2027)
   - **Medium**: MFA enabled but no phishing-resistant method
   - **Good**: Has phishing-resistant method but also weaker methods registered (residual attack surface)
   - **Secure**: All registered methods are phishing-resistant (FIDO2/Windows Hello only)
@@ -36,7 +36,8 @@ Interactive menu-driven MFA analysis with multiple output formats.
   - Column sorting (click any header)
   - Dropdown filters: Risk Level, MFA Status, User Type, Account Category, Account Status, Admin, Licensed, Last Sign-In
   - Text search across Display Name and UPN
-  - MFA Method chip filters with AND/OR logic toggle
+  - MFA Method chip filters with Any selected / Only selected matching
+  - Retirement advisory banner with Microsoft guidance and background reading links for SMS/voice-only MFA
   - Color-coded risk indicators
 - **CSV export**: Semicolon-delimited detailed user data + summary statistics
 - **Console summary**: Risk breakdown, method distribution, admin/member/guest stats

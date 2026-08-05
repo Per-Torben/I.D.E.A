@@ -8,6 +8,9 @@ Logs/
 exports/
 CA-Export/
 
+# Test artifacts
+/tests/
+
 # PowerShell debugging
 *.pdb
 *.ps1xml
