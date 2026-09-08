@@ -67,6 +67,9 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 - Automatically assigns the Teams Administrator role to the Teams app
 - Exchange access level menu: **view-only** (default, `View-Only Organization Management` role group, Exchange-scoped) or **full** (`Exchange Administrator` directory role) — both applied automatically
 - Generates service-specific connection `.ps1` scripts and a unified config JSON in `.\exports\`
+- **Verifies the deployment against the tenant** before reporting success — re-queries Graph to confirm the app, service principal, certificate, consented permissions and role assignment actually exist, and that the connection script was written. Reports verification failures and exits non-zero rather than claiming success
+
+**Requirements:** PowerShell 7 (Graph and Exchange ship conflicting MSAL versions; Exchange work runs in a separate process to keep them apart). Choosing Exchange view-only prompts a second browser sign-in, so that path is not unattended.
 
 **Generated Files (per prefix)**
 - `{Prefix}-Connect-MicrosoftGraph.ps1` — `Connect-MgGraph` with cert params filled in
