@@ -16,7 +16,9 @@
       1. Creates an app registration and service principal in Entra ID
       2. Attaches a shared certificate (new self-signed or existing .cer file)
       3. Assigns required API permissions and grants admin consent
-      4. Assigns required admin roles (Teams Administrator / Exchange Administrator)
+      4. Assigns required admin roles (Teams Administrator) and, for Exchange Online, the
+         chosen access level: 'View-Only Organization Management' role group (view-only,
+         default) or the Exchange Administrator directory role
       5. Exports a ready-to-use connection .ps1 script to .\exports\
 
     A config JSON file ({Prefix}-Config.json) is written to .\exports\ as a consolidated
@@ -49,7 +51,9 @@
 
     Prerequisites
     ─────────────
-    • PowerShell 7.0 or later
+    • PowerShell 7.0 or later — required. The Graph SDK isolates its dependencies in a
+      separate assembly load context, which lets it coexist with the Exchange Online
+      module's different MSAL version. Windows PowerShell 5.1 has no such isolation.
     • Global Administrator or Privileged Role Administrator in Entra ID
     • Internet access to Microsoft Graph
 
@@ -154,10 +158,12 @@ $script:ServiceDefinitions = @{
         DisplayName   = 'Exchange Online'
         ResourceAppId = '00000002-0000-0ff1-ce00-000000000000'
         Permissions   = @(
-            @{ Name = 'Exchange.ManageAsApp'; Type = 'Application'; Default = $true; Description = 'Full Exchange Online app-only access' }
+            @{ Name = 'Exchange.ManageAsApp'; Type = 'Application'; Default = $true; Description = 'Required app-only permission (actual access is scoped by the directory role below)' }
         )
-        AdminRoleId   = '29232cdf-9323-42fd-ade2-1d097af3e4de'
-        AdminRoleName = 'Exchange Administrator'
+        # Access level for EXO PowerShell app-only auth is set by the Entra directory role
+        # assigned to the service principal — chosen at runtime via Show-ExchangeAccessLevelMenu.
+        AdminRoleId   = $null
+        AdminRoleName = $null
         ConnectModule = 'ExchangeOnlineManagement'
     }
     SharePointOnline  = @{
@@ -444,6 +450,60 @@ function Show-PermissionsMenu {
 }
 
 
+function Show-ExchangeAccessLevelMenu {
+    <#
+    .SYNOPSIS
+        Prompts for the Exchange Online access level to grant the app.
+    .DESCRIPTION
+        Exchange.ManageAsApp is the only Graph app permission for Exchange app-only auth —
+        it does not distinguish read vs. write. The effective access level of an app-only
+        Exchange Online PowerShell session comes from either an Exchange role group
+        membership or an Entra directory role assigned to the app's service principal.
+
+        View-only uses the 'View-Only Organization Management' role group so read access
+        stays scoped to Exchange, rather than the tenant-wide Global Reader directory role.
+        Reference: https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+    .OUTPUTS
+        [hashtable] Level, Method ('ExchangeRoleGroup'/'EntraRole'), RoleName and (for
+        EntraRole) RoleId.
+    #>
+    param()
+
+    Write-Host ''
+    Write-Host '  Exchange Online Access Level' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host '  Both options are applied automatically by this script.' -ForegroundColor White
+    Write-Host ''
+    Write-Host "    [1]  View-only — 'View-Only Organization Management' role group (default)" -ForegroundColor White
+    Write-Host '         Read-only, scoped to Exchange only. Requires an extra Exchange sign-in.' -ForegroundColor DarkGray
+    Write-Host '    [2]  Full      — Exchange Administrator directory role' -ForegroundColor White
+    Write-Host '         Full Exchange management access.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    while ($true) {
+        Write-Host '  Choice [1]: ' -NoNewline -ForegroundColor Cyan
+        $userInput = (Read-Host).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($userInput) -or $userInput -eq '1') {
+            return @{
+                Level    = 'ViewOnly'
+                Method   = 'ExchangeRoleGroup'
+                RoleName = 'View-Only Organization Management'
+            }
+        }
+        if ($userInput -eq '2') {
+            return @{
+                Level    = 'Full'
+                Method   = 'EntraRole'
+                RoleId   = '29232cdf-9323-42fd-ade2-1d097af3e4de'
+                RoleName = 'Exchange Administrator'
+            }
+        }
+        Write-Host '  ✗ Enter 1 or 2.' -ForegroundColor Red
+    }
+}
+
+
 function Get-AppNamePrefix {
     <#
     .SYNOPSIS
@@ -507,7 +567,8 @@ function Show-ConfirmationSummary {
         [Parameter(Mandatory)] [string]$Prefix,
         [Parameter(Mandatory)] [hashtable]$SelectedPermissions,
         [Parameter(Mandatory)] [string]$CertMode,
-        [Parameter(Mandatory)] [string]$CertThumbprint
+        [Parameter(Mandatory)] [string]$CertThumbprint,
+        [hashtable]$ExchangeAccessLevel
     )
 
     Write-Host ''
@@ -528,6 +589,9 @@ function Show-ConfirmationSummary {
         }
         if ($def.AdminRoleId) {
             Write-Host "  │  Admin Role : $($def.AdminRoleName) (auto-assigned)" -ForegroundColor DarkGray
+        }
+        if ($svc -eq 'ExchangeOnline' -and $ExchangeAccessLevel) {
+            Write-Host "  │  Access Level : $($ExchangeAccessLevel.Level) — '$($ExchangeAccessLevel.RoleName)' (auto-assigned)" -ForegroundColor DarkGray
         }
         Write-Host "  │  Output     : $Prefix-Connect-$svc.ps1" -ForegroundColor DarkGray
         Write-Host '  └' -ForegroundColor White
@@ -798,6 +862,130 @@ function Grant-AdminRoleToApp {
 }
 
 
+function Install-RequiredModule {
+    <#
+    .SYNOPSIS
+        Installs a module for the current user if it is not already available.
+    .PARAMETER Name
+        Module name to check and install.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Name
+    )
+
+    if (Get-Module -ListAvailable -Name $Name) {
+        Write-Log "  ✓ $Name" -Level 'SUCCESS'
+        return
+    }
+
+    Write-Log "  Installing $Name ..." -Level 'INFO'
+    Install-Module $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+    Write-Log "  ✓ Installed $Name" -Level 'SUCCESS'
+}
+
+
+function Connect-ToExchangeOnlineAdmin {
+    <#
+    .SYNOPSIS
+        Connects interactively to Exchange Online PowerShell so the app's service principal
+        can be registered and added to an Exchange role group.
+    .PARAMETER OrgDomain
+        onmicrosoft.com domain of the tenant.
+    .NOTES
+        Load order relative to Microsoft.Graph does not matter on PowerShell 7: the Graph SDK
+        isolates its dependencies in the 'msgraph-load-context' ALC, so its MSAL version and
+        the one Exchange loads into the default context coexist. This is not true on Windows
+        PowerShell 5.1, hence the #Requires -Version 7.0 at the top of this script.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$OrgDomain
+    )
+
+    Install-RequiredModule -Name 'ExchangeOnlineManagement'
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
+    Write-Log 'Connecting to Exchange Online (browser sign-in required) to assign the role group...' -Level 'INFO'
+    Connect-ExchangeOnline -Organization $OrgDomain -ShowBanner:$false -ErrorAction Stop
+
+    Write-Log '  ✓ Connected to Exchange Online' -Level 'SUCCESS'
+}
+
+
+function Grant-ExchangeRoleGroupMembership {
+    <#
+    .SYNOPSIS
+        Registers the app as an Exchange service principal and adds it to an Exchange
+        role group (e.g. 'View-Only Organization Management').
+    .PARAMETER AppId
+        Application (client) ID of the app registration.
+    .PARAMETER ServicePrincipalId
+        Object ID of the Entra service principal.
+    .PARAMETER DisplayName
+        Display name for the Exchange service principal entry.
+    .PARAMETER RoleGroupName
+        Exchange role group to add the app to.
+    .OUTPUTS
+        [bool] $true only if membership is verified present, $false otherwise.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$AppId,
+        [Parameter(Mandatory)] [string]$ServicePrincipalId,
+        [Parameter(Mandatory)] [string]$DisplayName,
+        [Parameter(Mandatory)] [string]$RoleGroupName
+    )
+
+    try {
+        $existingSp = Get-ServicePrincipal -Identity $AppId -ErrorAction SilentlyContinue
+
+        if (-not $existingSp) {
+            Write-Log '  Registering Exchange service principal...' -Level 'INFO'
+            New-ServicePrincipal `
+                -AppId       $AppId `
+                -ObjectId    $ServicePrincipalId `
+                -DisplayName $DisplayName `
+                -ErrorAction Stop | Out-Null
+            Write-Log '  ✓ Exchange service principal registered' -Level 'SUCCESS'
+        }
+        else {
+            Write-Log '  Exchange service principal already registered' -Level 'INFO'
+        }
+
+        Write-Log "  Adding app to role group '$RoleGroupName'..." -Level 'INFO'
+
+        $alreadyMember = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
+                         Where-Object { $_.Name -eq $ServicePrincipalId }
+
+        if ($alreadyMember) {
+            Write-Log "  ✓ Already a member of role group '$RoleGroupName'" -Level 'SUCCESS'
+            return $true
+        }
+
+        Add-RoleGroupMember `
+            -Identity    $RoleGroupName `
+            -Member      $ServicePrincipalId `
+            -Confirm:$false `
+            -ErrorAction Stop | Out-Null
+
+        $member = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
+                  Where-Object { $_.Name -eq $ServicePrincipalId }
+
+        if (-not $member) {
+            throw "Membership not found in '$RoleGroupName' after the add operation"
+        }
+
+        Write-Log "  ✓ Added to role group '$RoleGroupName'" -Level 'SUCCESS'
+        return $true
+    }
+    catch {
+        Write-Log "  ⚠ Could not add app to '$RoleGroupName': $($_.Exception.Message)" -Level 'WARNING'
+        Write-Log "    Manual step: Connect-ExchangeOnline, then run:" -Level 'WARNING'
+        Write-Log "      New-ServicePrincipal -AppId $AppId -ObjectId $ServicePrincipalId -DisplayName '$DisplayName'" -Level 'WARNING'
+        Write-Log "      Add-RoleGroupMember -Identity '$RoleGroupName' -Member $ServicePrincipalId" -Level 'WARNING'
+        return $false
+    }
+}
+
+
 function Export-ConnectionScript {
     <#
     .SYNOPSIS
@@ -1052,8 +1240,16 @@ function Show-CompletionSummary {
         if ($result.ConsentFailed -gt 0) {
             Write-Host "  │  ⚠  $($result.ConsentFailed) permission(s) require manual consent in Entra portal" -ForegroundColor Yellow
         }
-        if ($result.ContainsKey('RoleAssigned') -and $result.RoleAssigned -eq $false -and $def.AdminRoleId) {
-            Write-Host "  │  ⚠  '$($def.AdminRoleName)' role requires manual assignment in Entra portal" -ForegroundColor Yellow
+        if ($result.ContainsKey('AccessLevel')) {
+            Write-Host "  │  Access Level : $($result.AccessLevel)" -ForegroundColor Gray
+        }
+        if ($result.ContainsKey('RoleName') -and $result.RoleName) {
+            if ($result.RoleAssigned) {
+                Write-Host "  │  Role       : $($result.RoleName) (assigned)" -ForegroundColor Gray
+            }
+            else {
+                Write-Host "  │  ⚠  '$($result.RoleName)' requires manual assignment — see log for commands" -ForegroundColor Yellow
+            }
         }
         Write-Host '  └' -ForegroundColor Green
         Write-Host ''
@@ -1062,13 +1258,19 @@ function Show-CompletionSummary {
     Write-Host "  All files written to: $ExportDir" -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  Next steps:' -ForegroundColor Yellow
-    Write-Host '    1. Verify the certificate (with private key) is in Cert:\CurrentUser\My.' -ForegroundColor White
+
+    $step = 1
+    Write-Host "    $step. Verify the certificate (with private key) is in Cert:\CurrentUser\My." -ForegroundColor White
     Write-Host "       Run: gci Cert:\CurrentUser\My | where Thumbprint -eq '$Thumbprint'" -ForegroundColor DarkGray
-    Write-Host '    2. Copy the connection scripts to your working directory.' -ForegroundColor White
-    Write-Host '    3. Run a connection script to test: .\<script>.ps1' -ForegroundColor White
+    $step++
+    Write-Host "    $step. Copy the connection scripts to your working directory." -ForegroundColor White
+    $step++
+    Write-Host "    $step. Run a connection script to test: .\<script>.ps1" -ForegroundColor White
+
     if ($SelectedServices -contains 'MicrosoftTeams' -or $SelectedServices -contains 'ExchangeOnline') {
-        Write-Host '    4. For Teams/Exchange: verify admin role assignments in Entra portal > Roles & admins' -ForegroundColor White
-        Write-Host '       before running the connection scripts.' -ForegroundColor DarkGray
+        $step++
+        Write-Host "    $step. Directory role assignments can take a few minutes to take effect." -ForegroundColor White
+        Write-Host '       Verify in Entra portal > Roles & admins if a connection is denied.' -ForegroundColor DarkGray
     }
     Write-Host ''
 
@@ -1158,6 +1360,18 @@ if ($MyInvocation.InvocationName -ne '.') {
         $selectedPermissions[$svc] = Show-PermissionsMenu -Service $svc
     }
 
+    $exchangeAccessLevel = $null
+    if ($selectedServices -contains 'ExchangeOnline') {
+        $exchangeAccessLevel = Show-ExchangeAccessLevelMenu
+        Write-Log "Exchange Online access level: $($exchangeAccessLevel.Level) ('$($exchangeAccessLevel.RoleName)')" -Level 'INFO'
+
+        # Installed up front so a missing module fails before any app registrations exist.
+        if ($exchangeAccessLevel.Method -eq 'ExchangeRoleGroup') {
+            Write-Host ''
+            Install-RequiredModule -Name 'ExchangeOnlineManagement'
+        }
+    }
+
     # ── Step 4: App Name Prefix ────────────────────────────────────────────────
     Write-Host ''
     Write-Host '  Step 4 of 5 — App Naming' -ForegroundColor Yellow
@@ -1191,11 +1405,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     Write-Host ''
     Write-Host '  Step 5 of 5 — Confirm & Create' -ForegroundColor Yellow
     $proceed = Show-ConfirmationSummary `
-        -SelectedServices    $selectedServices `
-        -Prefix              $prefix `
-        -SelectedPermissions $selectedPermissions `
-        -CertMode            $certMode `
-        -CertThumbprint      $certificate.Thumbprint
+        -SelectedServices     $selectedServices `
+        -Prefix               $prefix `
+        -SelectedPermissions  $selectedPermissions `
+        -CertMode             $certMode `
+        -CertThumbprint       $certificate.Thumbprint `
+        -ExchangeAccessLevel  $exchangeAccessLevel
 
     if (-not $proceed) {
         Write-Log 'User cancelled. No changes were made.' -Level 'WARNING'
@@ -1213,6 +1428,7 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     # ── Create app registrations ───────────────────────────────────────────────
     $appResults = @{}
+    $script:ExchangeOnlineConnected = $false
 
     foreach ($svc in $selectedServices) {
         $appName = "$prefix-$svc"
@@ -1227,14 +1443,44 @@ if ($MyInvocation.InvocationName -ne '.') {
                 -Permissions $selectedPermissions[$svc]
 
             # Assign admin role where applicable
-            $def = $script:ServiceDefinitions[$svc]
-            $result['RoleAssigned'] = $null
+            $def           = $script:ServiceDefinitions[$svc]
+            $adminRoleId   = $def.AdminRoleId
+            $adminRoleName = $def.AdminRoleName
 
-            if ($def.AdminRoleId) {
+            $result['RoleAssigned'] = $null
+            $result['RoleName']     = $adminRoleName
+
+            if ($svc -eq 'ExchangeOnline' -and $exchangeAccessLevel) {
+                $result['AccessLevel'] = $exchangeAccessLevel.Level
+                $result['RoleName']    = $exchangeAccessLevel.RoleName
+
+                if ($exchangeAccessLevel.Method -eq 'ExchangeRoleGroup') {
+                    if (-not $script:ExchangeOnlineConnected) {
+                        Connect-ToExchangeOnlineAdmin -OrgDomain $tenantMeta.OrgDomain
+                        $script:ExchangeOnlineConnected = $true
+                    }
+
+                    Start-Sleep -Seconds 10   # Allow the new service principal to reach Exchange
+
+                    $result['RoleAssigned'] = Grant-ExchangeRoleGroupMembership `
+                        -AppId              $result.AppId `
+                        -ServicePrincipalId $result.ServicePrincipalId `
+                        -DisplayName        $appName `
+                        -RoleGroupName      $exchangeAccessLevel.RoleName
+
+                    $adminRoleId = $null   # Handled by the role group instead
+                }
+                else {
+                    $adminRoleId   = $exchangeAccessLevel.RoleId
+                    $adminRoleName = $exchangeAccessLevel.RoleName
+                }
+            }
+
+            if ($adminRoleId) {
                 $result['RoleAssigned'] = Grant-AdminRoleToApp `
                     -ServicePrincipalId $result.ServicePrincipalId `
-                    -RoleDefinitionId   $def.AdminRoleId `
-                    -RoleName           $def.AdminRoleName
+                    -RoleDefinitionId   $adminRoleId `
+                    -RoleName           $adminRoleName
             }
 
             # Generate the connection script for this service
@@ -1255,6 +1501,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-Log "✗ Failed to create $appName : $($_.Exception.Message)" -Level 'ERROR'
             Write-Log "  StackTrace: $($_.ScriptStackTrace)" -Level 'ERROR'
         }
+    }
+
+    if ($script:ExchangeOnlineConnected) {
+        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Log 'Disconnected from Exchange Online.' -Level 'INFO'
     }
 
     # ── Export config JSON ─────────────────────────────────────────────────────
