@@ -64,7 +64,8 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 - Per-service permission review with toggle menu — defaults are minimal/read-only, optional extras can be enabled
 - App name prefix prompt with full preview table of app names and output file names before creating
 - Creates one app registration per service, attaches shared certificate, grants admin consent
-- Automatically assigns Teams Administrator and Exchange Administrator roles to respective apps
+- Automatically assigns the Teams Administrator role to the Teams app
+- Exchange access level menu: **view-only** (default, `View-Only Organization Management` role group, Exchange-scoped) or **full** (`Exchange Administrator` directory role) — both applied automatically
 - Generates service-specific connection `.ps1` scripts and a unified config JSON in `.\exports\`
 
 **Generated Files (per prefix)**

@@ -6,21 +6,25 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 
 Connecting PowerShell non-interactively to M365 services requires app registrations with certificate authentication. Setting these up manually is repetitive and error-prone. This tool automates the entire process in a single guided session.
 
-The script registers one app per selected service, attaches a shared certificate, assigns the correct API permissions with admin consent, assigns required admin roles (Teams/Exchange), and exports ready-to-use `.ps1` connection scripts.
+The script registers one app per selected service, attaches a shared certificate, assigns the correct API permissions with admin consent, grants the required administrative access (Teams, and a choice of view-only or full for Exchange), and exports ready-to-use `.ps1` connection scripts.
 
 ## Supported Services
 
-| # | Service | Module | Admin Role Assigned |
-|---|---------|--------|---------------------|
+| # | Service | Module | Access Granted |
+|---|---------|--------|----------------|
 | 1 | Microsoft Graph / Entra ID | `Microsoft.Graph.Authentication` | — |
 | 2 | Microsoft Teams | `MicrosoftTeams` | Teams Administrator |
-| 3 | Exchange Online | `ExchangeOnlineManagement` | Exchange Administrator |
+| 3 | Exchange Online | `ExchangeOnlineManagement` | **Choice:** view-only (default) or full — see below |
 | 4 | SharePoint Online | `PnP.PowerShell` | — |
 
 ## Prerequisites
 
-- **PowerShell 7.0 or later**
+- **PowerShell 7.0 or later** — required, not merely recommended. The Graph SDK isolates its
+  dependencies in a private assembly load context (`msgraph-load-context`), which lets its MSAL
+  version coexist with the different MSAL version the Exchange module loads. Windows PowerShell 5.1
+  has no such isolation and hits assembly conflicts between the two modules.
 - **Microsoft Graph PowerShell SDK** — auto-installed if missing (`Microsoft.Graph.Authentication`, `Microsoft.Graph.Applications`)
+- **`ExchangeOnlineManagement`** — auto-installed if missing, but only when Exchange Online is selected with view-only access
 - **Entra ID role:** Global Administrator, or Application Administrator + Privileged Role Administrator
 - Internet access to Microsoft Graph
 
@@ -102,12 +106,41 @@ Optional extras include write permissions and policy management scopes.
 **Exchange Online:**
 | Permission | Description |
 |---|---|
-| `Exchange.ManageAsApp` | Full Exchange Online app-only access |
+| `Exchange.ManageAsApp` | Required app-only permission — does **not** by itself define the access level |
+
+> `Exchange.ManageAsApp` is the only application permission available for Exchange app-only auth, and it does not distinguish read from write. The effective access level is decided separately in Step 3b.
 
 **SharePoint Online (via PnP):**
 | Permission | Description |
 |---|---|
 | `Sites.FullControl.All` | Full control of all site collections |
+
+### Step 3b — Exchange Access Level
+
+Shown only when Exchange Online is selected:
+
+```
+[1]  View-only — 'View-Only Organization Management' role group (default)
+     Read-only, scoped to Exchange only. Requires an extra Exchange sign-in.
+[2]  Full      — Exchange Administrator directory role
+     Full Exchange management access.
+```
+
+| | View-only (default) | Full |
+|---|---|---|
+| Mechanism | `New-ServicePrincipal` + `Add-RoleGroupMember` | Entra directory role assignment |
+| Grants | `View-Only Organization Management` role group | `Exchange Administrator` |
+| Scope | Exchange only | Exchange, plus minor non-Exchange rights |
+| Extra sign-in | **Yes** — interactive Exchange Online sign-in mid-run | No |
+| Visible in Entra "Roles & admins" | No | Yes |
+
+**Why the two paths differ.** Exchange surfaces directory-role holders inside its own RBAC through auto-maintained linked groups. `Exchange Administrator` lands in `ExchangeServiceAdmins_*`, which is itself a member of the `Organization Management` role group — so the app inherits exactly those permissions without being a literal member. Likewise `Global Reader` maps into `View-Only Organization Management`, meaning Global Reader and the role group grant *identical* Exchange permissions.
+
+The view-only path deliberately uses the role group rather than `Global Reader`, because `Global Reader` would also grant read access across the rest of M365.
+
+The full path deliberately uses the directory role rather than `Organization Management` membership, because directory role assignments are discoverable by tenant-wide privileged access reporting (including [IDEA-002](../IDEA-002-FindAllAdmins/README.md), which enumerates directory roles only). An app hidden inside Exchange RBAC would be an audit blind spot.
+
+> **Unattended runs:** choosing view-only requires a second interactive browser sign-in, so that path cannot run unattended.
 
 ### Step 4 — App Naming
 
@@ -133,7 +166,8 @@ The script then:
 1. Connects interactively to Microsoft Graph (browser sign-in)
 2. Derives the `onmicrosoft.com` domain and SharePoint admin URL from the tenant
 3. Creates each app registration, attaches the certificate, assigns permissions and consent
-4. Assigns admin roles for Teams and Exchange
+4. Assigns the Teams admin role, and applies the chosen Exchange access level — prompting for a
+   second Exchange Online sign-in if view-only was selected
 5. Generates all connection scripts
 6. Writes the config JSON
 
@@ -189,15 +223,31 @@ Connect-ExchangeOnline @ExchangeConnectionParams
    Get-MgContext
    ```
 
-3. **For Teams and Exchange:** Verify the admin role assignment in the Entra portal before connecting:
-   - Entra portal → **Roles & admins** → search for `Teams Administrator` or `Exchange Administrator` → confirm the app is listed
+3. **Verify the granted access:**
+
+   *Teams, and Exchange with full access* — Entra portal → **Roles & admins** → search for
+   `Teams Administrator` or `Exchange Administrator` → confirm the app is listed.
+
+   *Exchange with view-only* — the app will **not** appear under Roles & admins. Verify in Exchange instead:
+   ```powershell
+   Connect-ExchangeOnline -Organization '<tenant>.onmicrosoft.com'
+   Get-RoleGroupMember -Identity 'View-Only Organization Management'
+   ```
+   The app's service principal object ID should be listed with `RecipientType: User`.
+
+> Role and role group assignments can take a few minutes to take effect. If a connection is denied immediately after running the script, wait and retry before troubleshooting.
 
 ## Security Considerations
 
 - **Certificate storage:** The private key must remain in `Cert:\CurrentUser\My` on the machine running scripts. Never share `.pfx` files unsecured.
 - **Certificate duration:** The default is 180 days. Implement a renewal process before expiry.
 - **Permissions:** Start with the minimal defaults and only add extra permissions your use case requires.
+- **Exchange access level:** View-only is the default and should stay the default. Only choose full
+  Exchange access when the automation genuinely writes to Exchange — it is equivalent to the
+  `Organization Management` role group.
 - **Admin roles:** Teams Administrator and Exchange Administrator are powerful roles. Only assign them when automation requires it.
+- **PIM does not help here:** service principals cannot perform interactive PIM activation, so both
+  the directory role and the role group grant standing access. Review these apps periodically.
 - **One certificate, multiple apps:** Using the same certificate across multiple app registrations is supported and simplifies management — one renewal updates all apps.
 - **Logs:** `.\Logs\` contains execution logs. Review after each run. Logs are not pushed to the repository.
 
@@ -208,6 +258,10 @@ Connect-ExchangeOnline @ExchangeConnectionParams
 | `Certificate private key not found` | Run the connect script as the same user who created/installed the cert |
 | `Teams cmdlet not supported for app-only` | Check [supported cmdlets](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication#cmdlets-supported) |
 | `Exchange admin role not assigned` | Assign manually: Entra portal → Roles & admins → Exchange Administrator → Add assignments |
+| Exchange view-only assignment failed | The log prints the exact `New-ServicePrincipal` and `Add-RoleGroupMember` commands to run manually after `Connect-ExchangeOnline` |
+| `The "..." management role can't be found` | Role *groups* are not valid for `New-ManagementRoleAssignment -App`; that cmdlet only accepts `Application *` mailbox-data roles. Use role group membership or a directory role instead |
+| Exchange cmdlets return access denied despite assignment | Assignments take a few minutes to propagate; also confirm the app is not relying on a cached token |
+| `Could not load file or assembly 'Microsoft.Identity.Client'` | You are on Windows PowerShell 5.1 — rerun in PowerShell 7 |
 | `Could not grant consent` | Grant manually: Entra portal → App registrations → {AppName} → API permissions → Grant admin consent |
 | `onmicrosoft.com domain not found` | Ensure a verified `.onmicrosoft.com` domain exists on the tenant |
 
@@ -230,10 +284,12 @@ IDEA-003-CertAppRegistration/
 - [Microsoft Graph PowerShell SDK](https://learn.microsoft.com/en-us/powershell/microsoftgraph/)
 - [Teams PowerShell app-only auth](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
 - [Exchange app-only auth](https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2)
+- [Exchange Online role groups](https://learn.microsoft.com/en-us/exchange/permissions-exo/role-groups)
+- [RBAC for Applications in Exchange Online](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac)
 - [PnP PowerShell](https://pnp.github.io/powershell/)
 - [Self-signed certificates for app auth](https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-self-signed-certificate)
 
 ## Author
 
 Per-Torben Sørensen  
-Version: 1.0 | April 2026
+Version: 1.1 | September 2026
