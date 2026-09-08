@@ -23,7 +23,10 @@ The script registers one app per selected service, attaches a shared certificate
   dependencies in a private assembly load context (`msgraph-load-context`), which lets its MSAL
   version coexist with the different MSAL version the Exchange module loads. Windows PowerShell 5.1
   has no such isolation and hits assembly conflicts between the two modules.
-- **Microsoft Graph PowerShell SDK** — auto-installed if missing (`Microsoft.Graph.Authentication`, `Microsoft.Graph.Applications`)
+- **Microsoft Graph PowerShell SDK** — auto-installed if missing. Only two submodules are needed:
+  `Microsoft.Graph.Authentication` and `Microsoft.Graph.Applications`. Directory and role-management
+  calls go through `Invoke-MgGraphRequest` rather than `Microsoft.Graph.Identity.DirectoryManagement`
+  and `Microsoft.Graph.Identity.Governance`, keeping the install light on a clean machine.
 - **`ExchangeOnlineManagement`** — auto-installed if missing, but only when Exchange Online is selected with view-only access
 - **Entra ID role:** Global Administrator, or Application Administrator + Privileged Role Administrator
 - Internet access to Microsoft Graph
@@ -262,6 +265,7 @@ Connect-ExchangeOnline @ExchangeConnectionParams
 | `The "..." management role can't be found` | Role *groups* are not valid for `New-ManagementRoleAssignment -App`; that cmdlet only accepts `Application *` mailbox-data roles. Use role group membership or a directory role instead |
 | Exchange cmdlets return access denied despite assignment | Assignments take a few minutes to propagate; also confirm the app is not relying on a cached token |
 | `Could not load file or assembly 'Microsoft.Identity.Client'` | You are on Windows PowerShell 5.1 — rerun in PowerShell 7 |
+| `The term 'Get-MgOrganization' is not recognized` | Fixed in v1.2 — the script no longer depends on `Microsoft.Graph.Identity.DirectoryManagement`. Pull the latest version |
 | `Could not grant consent` | Grant manually: Entra portal → App registrations → {AppName} → API permissions → Grant admin consent |
 | `onmicrosoft.com domain not found` | Ensure a verified `.onmicrosoft.com` domain exists on the tenant |
 
@@ -292,4 +296,4 @@ IDEA-003-CertAppRegistration/
 ## Author
 
 Per-Torben Sørensen  
-Version: 1.1 | September 2026
+Version: 1.2 | September 2026

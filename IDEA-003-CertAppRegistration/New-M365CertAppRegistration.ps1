@@ -204,6 +204,44 @@ function Write-Log {
 }
 
 
+function Get-GraphErrorMessage {
+    <#
+    .SYNOPSIS
+        Extracts the Graph API error message from an error record.
+    .DESCRIPTION
+        Invoke-MgGraphRequest surfaces only the HTTP status in Exception.Message; the useful
+        detail sits in the JSON response body on ErrorDetails.
+    .PARAMETER ErrorRecord
+        The error record from a catch block.
+    .OUTPUTS
+        [string] Graph error message, falling back to the exception message.
+    #>
+    param(
+        [Parameter(Mandatory)] $ErrorRecord
+    )
+
+    $details = $ErrorRecord.ErrorDetails.Message
+
+    if ($details) {
+        # ErrorDetails carries the whole HTTP response, and headers contain JSON of their own,
+        # so anchor on the error object rather than the first brace.
+        $json = [regex]::Match($details, '(?s)\{\s*"error"\s*:.*\}').Value
+
+        if ($json) {
+            try {
+                $parsed = $json | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error.message) {
+                    return "$($parsed.error.message) [$($parsed.error.code)]"
+                }
+            }
+            catch { }
+        }
+    }
+
+    return $ErrorRecord.Exception.Message
+}
+
+
 function Show-Banner {
     Clear-Host
     Write-Host ''
@@ -638,16 +676,25 @@ function Get-TenantMetadata {
         Derives TenantId, onmicrosoft.com domain and SharePoint admin URL from the connected tenant.
     .OUTPUTS
         [hashtable] TenantId, OrgDomain, SPOAdminUrl
+    .NOTES
+        Uses Invoke-MgGraphRequest rather than Get-MgOrganization so this script does not depend
+        on Microsoft.Graph.Identity.DirectoryManagement.
     #>
     param()
 
-    $org = Get-MgOrganization -ErrorAction Stop | Select-Object -First 1
+    $response = Invoke-MgGraphRequest `
+        -Method      GET `
+        -Uri         'https://graph.microsoft.com/v1.0/organization' `
+        -OutputType  PSObject `
+        -ErrorAction Stop
+
+    $org = $response.value | Select-Object -First 1
     if (-not $org) { throw 'Unable to retrieve organization information from Microsoft Graph.' }
 
-    $tenantId  = $org.Id
-    $omsDomain = ($org.VerifiedDomains |
-                  Where-Object { $_.Name -match '\.onmicrosoft\.com$' } |
-                  Select-Object -First 1).Name
+    $tenantId  = $org.id
+    $omsDomain = ($org.verifiedDomains |
+                  Where-Object { $_.name -match '\.onmicrosoft\.com$' } |
+                  Select-Object -First 1).name
 
     if (-not $omsDomain) { throw 'Could not determine the onmicrosoft.com domain for this tenant.' }
 
@@ -835,6 +882,9 @@ function Grant-AdminRoleToApp {
         Display name for log messages.
     .OUTPUTS
         [bool] $true if role assigned successfully, $false otherwise.
+    .NOTES
+        Uses Invoke-MgGraphRequest rather than New-MgRoleManagementDirectoryRoleAssignment so this
+        script does not depend on Microsoft.Graph.Identity.Governance.
     #>
     param(
         [Parameter(Mandatory)] [string]$ServicePrincipalId,
@@ -845,17 +895,24 @@ function Grant-AdminRoleToApp {
     Write-Log "  Assigning role '$RoleName'..." -Level 'INFO'
 
     try {
-        New-MgRoleManagementDirectoryRoleAssignment `
-            -PrincipalId      $ServicePrincipalId `
-            -RoleDefinitionId $RoleDefinitionId `
-            -DirectoryScopeId '/' `
+        $body = @{
+            principalId      = $ServicePrincipalId
+            roleDefinitionId = $RoleDefinitionId
+            directoryScopeId = '/'
+        } | ConvertTo-Json
+
+        Invoke-MgGraphRequest `
+            -Method      POST `
+            -Uri         'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments' `
+            -Body        $body `
+            -ContentType 'application/json' `
             -ErrorAction Stop | Out-Null
 
         Write-Log "  ✓ Role '$RoleName' assigned" -Level 'SUCCESS'
         return $true
     }
     catch {
-        Write-Log "  ⚠ Could not assign '$RoleName': $($_.Exception.Message)" -Level 'WARNING'
+        Write-Log "  ⚠ Could not assign '$RoleName': $(Get-GraphErrorMessage -ErrorRecord $_)" -Level 'WARNING'
         Write-Log "    Manual step: Entra portal → Roles & admins → $RoleName → Add assignments → search app by name" -Level 'WARNING'
         return $false
     }
