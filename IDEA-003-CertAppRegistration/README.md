@@ -178,6 +178,28 @@ The script then:
    second Exchange Online sign-in if view-only was selected
 5. Generates all connection scripts
 6. Writes the config JSON
+7. **Verifies the deployment** by reading state back from the tenant before reporting success
+
+### Post-Deployment Verification
+
+Nothing is reported as successful until it has been read back from the tenant. For each app the
+script re-queries Graph and checks:
+
+| Check | Verified against |
+|---|---|
+| App registration exists | `GET /applications?$filter=appId eq '...'` |
+| Certificate attached | `keyCredentials.customKeyIdentifier` matches the thumbprint |
+| Service principal exists | `GET /servicePrincipals?$filter=appId eq '...'` |
+| Permissions consented | Actual `appRoleAssignments` count meets the expected count |
+| Directory role assigned | `GET /roleManagement/directory/roleAssignments` (when a role was expected) |
+| Connection script written | File exists on disk and is non-empty |
+
+Exchange role group membership is verified separately inside the child process before it reports success.
+
+If every check passes you get **`✓ Registration Complete and Verified`**. If any check fails the
+banner instead reads **`⚠ Registration Completed With Verification Failures`**, the specific failed
+checks are listed per app, and the script exits with code `1`. It will not claim success for work
+that did not actually land in the tenant.
 
 ## Generated Output Files
 
@@ -303,4 +325,4 @@ IDEA-003-CertAppRegistration/
 ## Author
 
 Per-Torben Sørensen  
-Version: 1.3 | September 2026
+Version: 1.4 | September 2026

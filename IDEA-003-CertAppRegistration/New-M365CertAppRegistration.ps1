@@ -945,6 +945,116 @@ function Install-RequiredModule {
 }
 
 
+function Test-AppRegistrationDeployment {
+    <#
+    .SYNOPSIS
+        Re-queries the tenant to confirm what the script claims to have created actually exists.
+    .DESCRIPTION
+        Every check reads current state back from Graph or disk rather than trusting the values
+        returned during creation, so the success summary cannot report work that did not land.
+    .PARAMETER AppId
+        Application (client) ID to verify.
+    .PARAMETER Thumbprint
+        Certificate thumbprint expected on the application.
+    .PARAMETER ExpectedAssignments
+        Number of app role assignments the script believes it granted.
+    .PARAMETER ExpectedRoleDefinitionId
+        Directory role template GUID expected on the service principal, if any.
+    .PARAMETER ConnectionScriptPath
+        Full path to the generated connection script.
+    .OUTPUTS
+        [hashtable] Passed (bool) and Checks (array of Name/Ok/Detail).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$AppId,
+        [Parameter(Mandatory)] [string]$Thumbprint,
+        [Parameter(Mandatory)] [int]$ExpectedAssignments,
+        [string]$ExpectedRoleDefinitionId,
+        [Parameter(Mandatory)] [string]$ConnectionScriptPath
+    )
+
+    $checks = [System.Collections.Generic.List[hashtable]]::new()
+
+    function Add-Check {
+        param([string]$Name, [bool]$Ok, [string]$Detail)
+        $checks.Add(@{ Name = $Name; Ok = $Ok; Detail = $Detail })
+    }
+
+    # ── Application ────────────────────────────────────────────────────────────
+    $app = $null
+    try {
+        $app = (Invoke-MgGraphRequest -Method GET -OutputType PSObject -ErrorAction Stop `
+                -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$AppId'").value |
+               Select-Object -First 1
+    }
+    catch { }
+
+    if ($app) { Add-Check -Name 'App registration exists' -Ok $true -Detail "ObjectId $($app.id)" }
+    else      { Add-Check -Name 'App registration exists' -Ok $false -Detail 'Not found in directory' }
+
+    # ── Certificate ────────────────────────────────────────────────────────────
+    if ($app) {
+        $certMatch = @($app.keyCredentials | Where-Object { $_.customKeyIdentifier -eq $Thumbprint })
+        if ($certMatch.Count -gt 0) {
+            Add-Check -Name 'Certificate attached' -Ok $true -Detail $Thumbprint
+        }
+        else {
+            Add-Check -Name 'Certificate attached' -Ok $false -Detail "Thumbprint $Thumbprint not on application"
+        }
+    }
+
+    # ── Service principal ──────────────────────────────────────────────────────
+    $sp = $null
+    try {
+        $sp = (Invoke-MgGraphRequest -Method GET -OutputType PSObject -ErrorAction Stop `
+               -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$AppId'").value |
+              Select-Object -First 1
+    }
+    catch { }
+
+    if ($sp) { Add-Check -Name 'Service principal exists' -Ok $true -Detail "ObjectId $($sp.id)" }
+    else     { Add-Check -Name 'Service principal exists' -Ok $false -Detail 'Not found in directory' }
+
+    # ── Granted permissions ────────────────────────────────────────────────────
+    if ($sp) {
+        $actual = 0
+        try {
+            $actual = @((Invoke-MgGraphRequest -Method GET -OutputType PSObject -ErrorAction Stop `
+                         -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments").value).Count
+        }
+        catch { }
+
+        Add-Check -Name 'Permissions consented' `
+                  -Ok ($actual -ge $ExpectedAssignments) `
+                  -Detail "$actual of $ExpectedAssignments granted"
+    }
+
+    # ── Directory role ─────────────────────────────────────────────────────────
+    if ($ExpectedRoleDefinitionId -and $sp) {
+        $roleOk = $false
+        try {
+            $assignments = @((Invoke-MgGraphRequest -Method GET -OutputType PSObject -ErrorAction Stop `
+                              -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=principalId eq '$($sp.id)'").value)
+            $roleOk = @($assignments | Where-Object { $_.roleDefinitionId -eq $ExpectedRoleDefinitionId }).Count -gt 0
+        }
+        catch { }
+
+        Add-Check -Name 'Directory role assigned' -Ok $roleOk `
+                  -Detail $(if ($roleOk) { 'Present at tenant scope' } else { 'Not found on service principal' })
+    }
+
+    # ── Connection script ──────────────────────────────────────────────────────
+    $scriptOk = (Test-Path $ConnectionScriptPath) -and ((Get-Item $ConnectionScriptPath).Length -gt 0)
+    Add-Check -Name 'Connection script written' -Ok $scriptOk `
+              -Detail $(if ($scriptOk) { Split-Path $ConnectionScriptPath -Leaf } else { 'Missing or empty' })
+
+    return @{
+        Passed = (@($checks | Where-Object { -not $_.Ok }).Count -eq 0)
+        Checks = $checks.ToArray()
+    }
+}
+
+
 function Grant-ExchangeRoleGroupMembership {
     <#
     .SYNOPSIS
@@ -1297,6 +1407,9 @@ function Show-CompletionSummary {
     <#
     .SYNOPSIS
         Displays the final summary with per-service ClientIds, script locations and next steps.
+    .PARAMETER Unverified
+        Services that were created but failed post-deployment verification. When non-empty the
+        banner reports a partial result instead of success.
     #>
     param(
         [Parameter(Mandatory)] [string]$Prefix,
@@ -1304,13 +1417,22 @@ function Show-CompletionSummary {
         [Parameter(Mandatory)] [string]$Thumbprint,
         [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$SelectedServices,
         [Parameter(Mandatory)] [hashtable]$AppResults,
-        [Parameter(Mandatory)] [string]$ExportDir
+        [Parameter(Mandatory)] [string]$ExportDir,
+        [AllowEmptyCollection()] [string[]]$Unverified = @()
     )
 
+    $allVerified = ($Unverified.Count -eq 0)
+    $bannerColor = if ($allVerified) { 'Green' } else { 'Yellow' }
+
     Write-Host ''
-    Write-Host '╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor Green
-    Write-Host '║  ✓  Registration Complete                                            ║' -ForegroundColor Green
-    Write-Host '╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor Green
+    Write-Host '╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor $bannerColor
+    if ($allVerified) {
+        Write-Host '║  ✓  Registration Complete and Verified                               ║' -ForegroundColor $bannerColor
+    }
+    else {
+        Write-Host '║  ⚠  Registration Completed With Verification Failures                ║' -ForegroundColor $bannerColor
+    }
+    Write-Host '╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor $bannerColor
     Write-Host ''
     Write-Host "  Tenant ID   : $TenantId" -ForegroundColor White
     Write-Host "  Thumbprint  : $Thumbprint" -ForegroundColor White
@@ -1339,6 +1461,19 @@ function Show-CompletionSummary {
                 Write-Host "  │  ⚠  '$($result.RoleName)' requires manual assignment — see log for commands" -ForegroundColor Yellow
             }
         }
+
+        if ($result.ContainsKey('Verification')) {
+            if ($result.Verification.Passed) {
+                Write-Host '  │  Verified   : all checks passed' -ForegroundColor Gray
+            }
+            else {
+                Write-Host '  │  ✗  Verification failed:' -ForegroundColor Red
+                foreach ($check in $result.Verification.Checks | Where-Object { -not $_.Ok }) {
+                    Write-Host "  │       • $($check.Name) — $($check.Detail)" -ForegroundColor Red
+                }
+            }
+        }
+
         Write-Host '  └' -ForegroundColor Green
         Write-Host ''
     }
@@ -1362,7 +1497,14 @@ function Show-CompletionSummary {
     }
     Write-Host ''
 
-    Write-Log 'I.D.E.A. 003 completed successfully.' -Level 'SUCCESS'
+    if ($allVerified) {
+        Write-Log 'I.D.E.A. 003 completed successfully.' -Level 'SUCCESS'
+    }
+    else {
+        Write-Log "I.D.E.A. 003 finished with verification failures: $($Unverified -join ', ')" -Level 'WARNING'
+        Write-Host "  Log file: $script:LogFile" -ForegroundColor Yellow
+        Write-Host ''
+    }
 }
 
 #endregion
@@ -1567,7 +1709,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
 
             # Generate the connection script for this service
-            Export-ConnectionScript `
+            $scriptPath = Export-ConnectionScript `
                 -Service     $svc `
                 -Prefix      $prefix `
                 -ClientId    $result.AppId `
@@ -1575,10 +1717,34 @@ if ($MyInvocation.InvocationName -ne '.') {
                 -Thumbprint  $certificate.Thumbprint `
                 -ExportDir   $script:ExportDir `
                 -OrgDomain   $tenantMeta.OrgDomain `
-                -SPOAdminUrl $tenantMeta.SPOAdminUrl | Out-Null
+                -SPOAdminUrl $tenantMeta.SPOAdminUrl
+
+            # Read state back from the tenant before anything is reported as successful.
+            Write-Log '  Verifying deployment...' -Level 'INFO'
+            Start-Sleep -Seconds 3   # Allow the directory to settle before reading back
+
+            $verifyRoleId = if ($adminRoleId) { $adminRoleId } else { '' }
+
+            $result['Verification'] = Test-AppRegistrationDeployment `
+                -AppId                    $result.AppId `
+                -Thumbprint               $certificate.Thumbprint `
+                -ExpectedAssignments      $result.ConsentSucceeded `
+                -ExpectedRoleDefinitionId $verifyRoleId `
+                -ConnectionScriptPath     $scriptPath
+
+            foreach ($check in $result.Verification.Checks) {
+                if ($check.Ok) { Write-Log "    ✓ $($check.Name): $($check.Detail)" -Level 'SUCCESS' }
+                else           { Write-Log "    ✗ $($check.Name): $($check.Detail)" -Level 'ERROR' }
+            }
 
             $appResults[$svc] = $result
-            Write-Log "✓ $appName completed successfully" -Level 'SUCCESS'
+
+            if ($result.Verification.Passed) {
+                Write-Log "✓ $appName verified" -Level 'SUCCESS'
+            }
+            else {
+                Write-Log "⚠ $appName created but failed verification" -Level 'WARNING'
+            }
         }
         catch {
             Write-Log "✗ Failed to create $appName : $($_.Exception.Message)" -Level 'ERROR'
@@ -1613,17 +1779,28 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 1
     }
 
+    $unverified = @($completedServices | Where-Object {
+        $appResults[$_].ContainsKey('Verification') -and -not $appResults[$_].Verification.Passed
+    })
+
     Show-CompletionSummary `
         -Prefix           $prefix `
         -TenantId         $tenantMeta.TenantId `
         -Thumbprint       $certificate.Thumbprint `
         -SelectedServices $completedServices `
         -AppResults       $appResults `
-        -ExportDir        $script:ExportDir
+        -ExportDir        $script:ExportDir `
+        -Unverified       $unverified
 
     $failedServices = @($selectedServices | Where-Object { -not $appResults.ContainsKey($_) })
+
     if ($failedServices.Count -gt 0) {
         Write-Log "⚠ $($failedServices.Count) service(s) failed: $($failedServices -join ', ')" -Level 'WARNING'
+        exit 1
+    }
+
+    if ($unverified.Count -gt 0) {
+        Write-Log "⚠ $($unverified.Count) service(s) failed verification: $($unverified -join ', ')" -Level 'WARNING'
         exit 1
     }
 }
