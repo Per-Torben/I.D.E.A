@@ -51,11 +51,15 @@
 
     Prerequisites
     ─────────────
-    • PowerShell 7.0 or later — required. The Graph SDK isolates its dependencies in a
-      separate assembly load context, which lets it coexist with the Exchange Online
-      module's different MSAL version. Windows PowerShell 5.1 has no such isolation.
+    • PowerShell 7.0 or later — required.
     • Global Administrator or Privileged Role Administrator in Entra ID
     • Internet access to Microsoft Graph
+
+    Note on Graph vs Exchange
+    ─────────────────────────
+    Microsoft.Graph and ExchangeOnlineManagement ship different MSAL versions and cannot both
+    sign in interactively in one process — whichever authenticates second fails. All Exchange
+    work therefore runs in a separate PowerShell process (see Grant-ExchangeRoleGroupMembership).
 
 .EXAMPLE
     .\New-M365CertAppRegistration.ps1
@@ -941,38 +945,18 @@ function Install-RequiredModule {
 }
 
 
-function Connect-ToExchangeOnlineAdmin {
-    <#
-    .SYNOPSIS
-        Connects interactively to Exchange Online PowerShell so the app's service principal
-        can be registered and added to an Exchange role group.
-    .PARAMETER OrgDomain
-        onmicrosoft.com domain of the tenant.
-    .NOTES
-        Load order relative to Microsoft.Graph does not matter on PowerShell 7: the Graph SDK
-        isolates its dependencies in the 'msgraph-load-context' ALC, so its MSAL version and
-        the one Exchange loads into the default context coexist. This is not true on Windows
-        PowerShell 5.1, hence the #Requires -Version 7.0 at the top of this script.
-    #>
-    param(
-        [Parameter(Mandatory)] [string]$OrgDomain
-    )
-
-    Install-RequiredModule -Name 'ExchangeOnlineManagement'
-    Import-Module ExchangeOnlineManagement -ErrorAction Stop
-
-    Write-Log 'Connecting to Exchange Online (browser sign-in required) to assign the role group...' -Level 'INFO'
-    Connect-ExchangeOnline -Organization $OrgDomain -ShowBanner:$false -ErrorAction Stop
-
-    Write-Log '  ✓ Connected to Exchange Online' -Level 'SUCCESS'
-}
-
-
 function Grant-ExchangeRoleGroupMembership {
     <#
     .SYNOPSIS
         Registers the app as an Exchange service principal and adds it to an Exchange
         role group (e.g. 'View-Only Organization Management').
+    .DESCRIPTION
+        Runs the Exchange work in a separate PowerShell process. Microsoft.Graph and
+        ExchangeOnlineManagement cannot both perform interactive sign-in in one process:
+        whichever authenticates second fails inside MSAL — Exchange with a RuntimeBroker
+        NullReferenceException, or Graph with a 'Method not found' on a WithLogging overload,
+        depending on the order. Certificate auth is unaffected, which is why the conflict only
+        appears on the interactive path. A child process gives each module its own MSAL.
     .PARAMETER AppId
         Application (client) ID of the app registration.
     .PARAMETER ServicePrincipalId
@@ -981,6 +965,8 @@ function Grant-ExchangeRoleGroupMembership {
         Display name for the Exchange service principal entry.
     .PARAMETER RoleGroupName
         Exchange role group to add the app to.
+    .PARAMETER OrgDomain
+        onmicrosoft.com domain of the tenant.
     .OUTPUTS
         [bool] $true only if membership is verified present, $false otherwise.
     #>
@@ -988,57 +974,102 @@ function Grant-ExchangeRoleGroupMembership {
         [Parameter(Mandatory)] [string]$AppId,
         [Parameter(Mandatory)] [string]$ServicePrincipalId,
         [Parameter(Mandatory)] [string]$DisplayName,
-        [Parameter(Mandatory)] [string]$RoleGroupName
+        [Parameter(Mandatory)] [string]$RoleGroupName,
+        [Parameter(Mandatory)] [string]$OrgDomain
     )
 
+    $childScript = @'
+param(
+    [Parameter(Mandatory)] [string]$AppId,
+    [Parameter(Mandatory)] [string]$ServicePrincipalId,
+    [Parameter(Mandatory)] [string]$DisplayName,
+    [Parameter(Mandatory)] [string]$RoleGroupName,
+    [Parameter(Mandatory)] [string]$OrgDomain
+)
+
+$ErrorActionPreference = 'Stop'
+
+try {
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
+    Write-Host '  Connecting to Exchange Online (browser sign-in required)...'
+    Connect-ExchangeOnline -Organization $OrgDomain -ShowBanner:$false -ErrorAction Stop
+    Write-Host '  Connected to Exchange Online'
+
+    $existingSp = Get-ServicePrincipal -Identity $AppId -ErrorAction SilentlyContinue
+    if (-not $existingSp) {
+        Write-Host '  Registering Exchange service principal...'
+        New-ServicePrincipal -AppId $AppId -ObjectId $ServicePrincipalId -DisplayName $DisplayName -ErrorAction Stop | Out-Null
+        Write-Host '  Exchange service principal registered'
+    }
+    else {
+        Write-Host '  Exchange service principal already registered'
+    }
+
+    $alreadyMember = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
+                     Where-Object { $_.Name -eq $ServicePrincipalId }
+
+    if (-not $alreadyMember) {
+        Add-RoleGroupMember -Identity $RoleGroupName -Member $ServicePrincipalId -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+
+    $member = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
+              Where-Object { $_.Name -eq $ServicePrincipalId }
+
+    if (-not $member) {
+        throw "Membership not found in '$RoleGroupName' after the add operation"
+    }
+
+    Write-Host "  Verified membership of '$RoleGroupName'"
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+    exit 0
+}
+catch {
+    Write-Host "  ERROR: $($_.Exception.Message)"
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+    exit 1
+}
+'@
+
+    $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "IDEA003-Exo-$([guid]::NewGuid().ToString('N')).ps1"
+
     try {
-        $existingSp = Get-ServicePrincipal -Identity $AppId -ErrorAction SilentlyContinue
+        Set-Content -Path $tempScript -Value $childScript -Encoding UTF8 -ErrorAction Stop
 
-        if (-not $existingSp) {
-            Write-Log '  Registering Exchange service principal...' -Level 'INFO'
-            New-ServicePrincipal `
-                -AppId       $AppId `
-                -ObjectId    $ServicePrincipalId `
-                -DisplayName $DisplayName `
-                -ErrorAction Stop | Out-Null
-            Write-Log '  ✓ Exchange service principal registered' -Level 'SUCCESS'
-        }
-        else {
-            Write-Log '  Exchange service principal already registered' -Level 'INFO'
-        }
+        # Reuse the running interpreter rather than trusting 'pwsh' to be on PATH.
+        $pwshPath = (Get-Process -Id $PID).Path
 
-        Write-Log "  Adding app to role group '$RoleGroupName'..." -Level 'INFO'
+        Write-Log '  Launching separate process for Exchange Online (avoids MSAL conflict with Graph)...' -Level 'INFO'
 
-        $alreadyMember = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
-                         Where-Object { $_.Name -eq $ServicePrincipalId }
+        # Child output must be routed to the log, not left on the pipeline where it would
+        # contaminate this function's boolean return value.
+        & $pwshPath -NoProfile -File $tempScript `
+            -AppId              $AppId `
+            -ServicePrincipalId $ServicePrincipalId `
+            -DisplayName        $DisplayName `
+            -RoleGroupName      $RoleGroupName `
+            -OrgDomain          $OrgDomain 2>&1 |
+            ForEach-Object { Write-Log "  $_" -Level 'INFO' }
 
-        if ($alreadyMember) {
-            Write-Log "  ✓ Already a member of role group '$RoleGroupName'" -Level 'SUCCESS'
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0) {
+            Write-Log "  ✓ Added to role group '$RoleGroupName'" -Level 'SUCCESS'
             return $true
         }
 
-        Add-RoleGroupMember `
-            -Identity    $RoleGroupName `
-            -Member      $ServicePrincipalId `
-            -Confirm:$false `
-            -ErrorAction Stop | Out-Null
-
-        $member = Get-RoleGroupMember -Identity $RoleGroupName -ErrorAction Stop |
-                  Where-Object { $_.Name -eq $ServicePrincipalId }
-
-        if (-not $member) {
-            throw "Membership not found in '$RoleGroupName' after the add operation"
-        }
-
-        Write-Log "  ✓ Added to role group '$RoleGroupName'" -Level 'SUCCESS'
-        return $true
-    }
-    catch {
-        Write-Log "  ⚠ Could not add app to '$RoleGroupName': $($_.Exception.Message)" -Level 'WARNING'
-        Write-Log "    Manual step: Connect-ExchangeOnline, then run:" -Level 'WARNING'
+        Write-Log "  ⚠ Exchange role group assignment failed (exit code $exitCode)" -Level 'WARNING'
+        Write-Log '    Manual step: Connect-ExchangeOnline, then run:' -Level 'WARNING'
         Write-Log "      New-ServicePrincipal -AppId $AppId -ObjectId $ServicePrincipalId -DisplayName '$DisplayName'" -Level 'WARNING'
         Write-Log "      Add-RoleGroupMember -Identity '$RoleGroupName' -Member $ServicePrincipalId" -Level 'WARNING'
         return $false
+    }
+    catch {
+        Write-Log "  ⚠ Could not run Exchange role group assignment: $($_.Exception.Message)" -Level 'WARNING'
+        return $false
+    }
+    finally {
+        if (Test-Path $tempScript) { Remove-Item $tempScript -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1271,7 +1302,7 @@ function Show-CompletionSummary {
         [Parameter(Mandatory)] [string]$Prefix,
         [Parameter(Mandatory)] [string]$TenantId,
         [Parameter(Mandatory)] [string]$Thumbprint,
-        [Parameter(Mandatory)] [string[]]$SelectedServices,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$SelectedServices,
         [Parameter(Mandatory)] [hashtable]$AppResults,
         [Parameter(Mandatory)] [string]$ExportDir
     )
@@ -1485,7 +1516,6 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     # ── Create app registrations ───────────────────────────────────────────────
     $appResults = @{}
-    $script:ExchangeOnlineConnected = $false
 
     foreach ($svc in $selectedServices) {
         $appName = "$prefix-$svc"
@@ -1512,18 +1542,14 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $result['RoleName']    = $exchangeAccessLevel.RoleName
 
                 if ($exchangeAccessLevel.Method -eq 'ExchangeRoleGroup') {
-                    if (-not $script:ExchangeOnlineConnected) {
-                        Connect-ToExchangeOnlineAdmin -OrgDomain $tenantMeta.OrgDomain
-                        $script:ExchangeOnlineConnected = $true
-                    }
-
                     Start-Sleep -Seconds 10   # Allow the new service principal to reach Exchange
 
                     $result['RoleAssigned'] = Grant-ExchangeRoleGroupMembership `
                         -AppId              $result.AppId `
                         -ServicePrincipalId $result.ServicePrincipalId `
                         -DisplayName        $appName `
-                        -RoleGroupName      $exchangeAccessLevel.RoleName
+                        -RoleGroupName      $exchangeAccessLevel.RoleName `
+                        -OrgDomain          $tenantMeta.OrgDomain
 
                     $adminRoleId = $null   # Handled by the role group instead
                 }
@@ -1560,11 +1586,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
-    if ($script:ExchangeOnlineConnected) {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Log 'Disconnected from Exchange Online.' -Level 'INFO'
-    }
-
     # ── Export config JSON ─────────────────────────────────────────────────────
     if ($appResults.Count -gt 0) {
         Write-Host ''
@@ -1579,6 +1600,19 @@ if ($MyInvocation.InvocationName -ne '.') {
     # ── Final summary ──────────────────────────────────────────────────────────
     $completedServices = @($selectedServices | Where-Object { $appResults.ContainsKey($_) })
 
+    # Never show the success banner when nothing was created.
+    if ($completedServices.Count -eq 0) {
+        Write-Host ''
+        Write-Host '╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor Red
+        Write-Host '║  ✗  Registration Failed                                              ║' -ForegroundColor Red
+        Write-Host '╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor Red
+        Write-Host ''
+        Write-Log 'No app registrations were completed. Review the errors above.' -Level 'ERROR'
+        Write-Host "  Log file: $script:LogFile" -ForegroundColor Yellow
+        Write-Host ''
+        exit 1
+    }
+
     Show-CompletionSummary `
         -Prefix           $prefix `
         -TenantId         $tenantMeta.TenantId `
@@ -1586,5 +1620,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         -SelectedServices $completedServices `
         -AppResults       $appResults `
         -ExportDir        $script:ExportDir
+
+    $failedServices = @($selectedServices | Where-Object { -not $appResults.ContainsKey($_) })
+    if ($failedServices.Count -gt 0) {
+        Write-Log "⚠ $($failedServices.Count) service(s) failed: $($failedServices -join ', ')" -Level 'WARNING'
+        exit 1
+    }
 }
 #endregion
