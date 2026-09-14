@@ -53,6 +53,7 @@
     • On-screen summary with risk statistics and detailed findings
     • CSV export: RoleDistribution (roles/groups with assignment counts)
     • CSV export: UserStatus (per-user details with roles, MFA methods, risk levels)
+    • Interactive HTML report: filterable/sortable dashboard of every privileged principal
     
     The script resolves complex privilege paths including scenarios where users are eligible 
     to activate membership in groups that are themselves eligible to activate membership in 
@@ -865,6 +866,743 @@ function Get-CrossTenantMfaTrust {
     }
 
     return $result
+}
+
+#endregion
+
+#region HTML Report
+
+function Get-PrivilegedAccountRiskAssessment {
+    param(
+        [Parameter(Mandatory)][AllowNull()]$MFAStatus,
+        [Parameter(Mandatory)][AllowNull()]$AUProtection,
+        [AllowNull()]$MFATrust
+    )
+
+    if ($null -eq $MFAStatus -or $null -eq $MFAStatus.MFACapable) {
+        return @{ Level = 'Unknown'; Notes = 'MFA status unavailable (missing permission or restricted AU access)' }
+    }
+
+    $hasPhone = ($MFAStatus.HasPhone -eq $true)
+    $auProtected = ($AUProtection -and $AUProtection.IsProtected -eq $true)
+
+    if ($MFAStatus.MFACapable -eq $false) {
+        if ($MFATrust -and $MFATrust.Status -eq 'Trusted') {
+            return @{ Level = 'Medium'; Notes = "No MFA in this tenant, but inbound MFA trust accepts home tenant MFA ($($MFATrust.HomeTenant))" }
+        }
+        return @{ Level = 'Critical'; Notes = 'No MFA method registered on a privileged account' }
+    }
+    if ($hasPhone -and -not $auProtected) {
+        return @{ Level = 'High'; Notes = 'Phone/SMS MFA (SIM-swap risk) and no restricted AU protection' }
+    }
+    if ($hasPhone) {
+        return @{ Level = 'Medium'; Notes = 'Phone/SMS MFA is vulnerable to SIM swapping' }
+    }
+    if (-not $auProtected) {
+        return @{ Level = 'Medium'; Notes = 'Not protected by a restricted administrative unit' }
+    }
+    return @{ Level = 'Low'; Notes = 'Strong MFA and restricted AU protection' }
+}
+
+function Get-FilteredGroupBasedRoles {
+    param([Parameter(Mandatory)][AllowNull()]$Account)
+
+    $groupRoles = @($Account.GroupBasedRoles)
+    $pimGroupRoles = @($Account.PIMGroupEligibleRoles)
+    $filtered = @()
+
+    foreach ($role in $groupRoles) {
+        # "PIM Group Active Member" is only meaningful when the group grants no real role on its own
+        if ($role.RoleName -eq 'PIM Group Active Member') {
+            $grantsActualRoles = $false
+            foreach ($otherRole in ($groupRoles + $pimGroupRoles)) {
+                if ($otherRole.RoleName -eq 'PIM Group Active Member') { continue }
+                if ($otherRole.GroupName -eq $role.GroupName -or
+                    $otherRole.GroupName -like "$($role.GroupName) *" -or
+                    $otherRole.GroupName -like "$($role.GroupName) → *") {
+                    $grantsActualRoles = $true
+                    break
+                }
+            }
+            if ($grantsActualRoles) { continue }
+        }
+        $filtered += $role
+    }
+
+    return $filtered
+}
+
+function New-PrivilegedAccountHtmlReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$PrivilegedUsers,
+        [Parameter(Mandatory)][hashtable]$ServicePrincipals,
+        [Parameter(Mandatory)][hashtable]$PrivilegedGroups,
+        [Parameter(Mandatory)][hashtable]$RoleStats,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [string]$TenantName = 'Unknown',
+        [bool]$IncludeGroupAssignments = $true
+    )
+
+    $methodTagMap = @{
+        'Microsoft Authenticator' = 'Authenticator'
+        'Phone'                   = 'Phone'
+        'Email'                   = 'Email'
+        'FIDO2 Security Key'      = 'FIDO2'
+        'Windows Hello'           = 'Windows Hello'
+        'Software OATH'           = 'Software OATH'
+        'Temporary Access Pass'   = 'TAP'
+    }
+
+    $rows = @()
+
+    foreach ($user in $PrivilegedUsers.Values) {
+        $mfa = $user.MFAStatus
+        $risk = Get-PrivilegedAccountRiskAssessment -MFAStatus $mfa -AUProtection $user.AUProtection -MFATrust $user.MFATrust
+
+        $roles = @()
+        foreach ($role in $user.ActiveRoles) { $roles += @{ n = $role.RoleName; t = 'Active'; g = '' } }
+        foreach ($role in $user.EligibleRoles) { $roles += @{ n = $role.RoleName; t = 'PIM Eligible'; g = '' } }
+        if ($IncludeGroupAssignments) {
+            foreach ($role in (Get-FilteredGroupBasedRoles -Account $user)) {
+                $roles += @{ n = $role.RoleName; t = 'Group-Based'; g = $role.GroupName }
+            }
+        }
+        foreach ($role in $user.PIMGroupEligibleRoles) {
+            $roles += @{ n = $role.RoleName; t = 'PIM Group Eligible'; g = $role.GroupName }
+        }
+
+        $methodsList = if ($mfa -and $mfa.MethodsList) { @($mfa.MethodsList) } else { @() }
+        $methodTags = @($methodsList | ForEach-Object { if ($methodTagMap.ContainsKey($_)) { $methodTagMap[$_] } else { $_ } })
+
+        $mfaStatusText = if ($null -eq $mfa -or $null -eq $mfa.MFACapable) { 'Unknown' }
+        elseif ($mfa.MFACapable) { 'Enabled' } else { 'Disabled' }
+
+        $rows += [PSCustomObject]@{
+            displayName     = $user.DisplayName
+            identifier      = $user.UserPrincipalName
+            principalType   = 'User'
+            accountStatus   = if ($user.AccountEnabled) { 'Enabled' } else { 'Disabled' }
+            mfaStatus       = $mfaStatusText
+            mfaMethods      = if ($methodTags.Count -gt 0) { $methodTags -join ', ' } else { '-' }
+            methodTags      = $methodTags
+            phoneNumbers    = if ($mfa -and $mfa.PhoneNumbers) { @($mfa.PhoneNumbers) -join ', ' } else { '' }
+            auProtected     = if ($user.AUProtection -and $user.AUProtection.IsProtected) { 'Yes' } else { 'No' }
+            auName          = if ($user.AUProtection) { [string]$user.AUProtection.AUName } else { '' }
+            mfaTrust        = if ($user.MFATrust) { $user.MFATrust.Status } else { 'N/A' }
+            homeTenant      = if ($user.MFATrust) { [string]$user.MFATrust.HomeTenant } else { '' }
+            assignmentTags  = @($roles | ForEach-Object { $_.t } | Select-Object -Unique)
+            roles           = $roles
+            rolesText       = (@($roles | ForEach-Object { $_.n }) -join ', ')
+            roleCount       = $roles.Count
+            riskLevel       = $risk.Level
+            riskNotes       = $risk.Notes
+        }
+    }
+
+    foreach ($sp in $ServicePrincipals.Values) {
+        $roles = @()
+        foreach ($role in $sp.ActiveRoles) { $roles += @{ n = $role.RoleName; t = 'Active'; g = '' } }
+        foreach ($role in $sp.EligibleRoles) { $roles += @{ n = $role.RoleName; t = 'PIM Eligible'; g = '' } }
+
+        $rows += [PSCustomObject]@{
+            displayName     = $sp.DisplayName
+            identifier      = "App ID: $($sp.AppId)"
+            principalType   = 'Service Principal'
+            accountStatus   = 'N/A'
+            mfaStatus       = 'N/A'
+            mfaMethods      = '-'
+            methodTags      = @()
+            phoneNumbers    = ''
+            auProtected     = 'N/A'
+            auName          = ''
+            mfaTrust        = 'N/A'
+            homeTenant      = ''
+            assignmentTags  = @($roles | ForEach-Object { $_.t } | Select-Object -Unique)
+            roles           = $roles
+            rolesText       = (@($roles | ForEach-Object { $_.n }) -join ', ')
+            roleCount       = $roles.Count
+            riskLevel       = 'N/A'
+            riskNotes       = 'Service principal - secure with certificate credentials and workload identity CA'
+        }
+    }
+
+    foreach ($group in $PrivilegedGroups.Values) {
+        $roles = @()
+        foreach ($role in $group.ActiveRoles) { $roles += @{ n = $role.RoleName; t = 'Active'; g = '' } }
+        foreach ($role in $group.EligibleRoles) { $roles += @{ n = $role.RoleName; t = 'PIM Eligible'; g = '' } }
+
+        $rows += [PSCustomObject]@{
+            displayName     = $group.DisplayName
+            identifier      = "$($group.MemberCount) members"
+            principalType   = 'Role-Assignable Group'
+            accountStatus   = 'N/A'
+            mfaStatus       = 'N/A'
+            mfaMethods      = '-'
+            methodTags      = @()
+            phoneNumbers    = ''
+            auProtected     = 'N/A'
+            auName          = ''
+            mfaTrust        = 'N/A'
+            homeTenant      = ''
+            assignmentTags  = @($roles | ForEach-Object { $_.t } | Select-Object -Unique)
+            roles           = $roles
+            rolesText       = (@($roles | ForEach-Object { $_.n }) -join ', ')
+            roleCount       = $roles.Count
+            riskLevel       = 'N/A'
+            riskNotes       = 'Role-assignable group - every member inherits the roles below'
+        }
+    }
+
+    $roleRows = foreach ($role in $RoleStats.Values) {
+        [PSCustomObject]@{
+            roleName    = $role.RoleName
+            type        = $role.Type
+            active      = $role.ActiveCount
+            eligible    = $role.EligibleCount
+            groupBased  = $role.GroupBasedCount
+            pimGroup    = $role.PIMGroupEligibleCount
+            totalUsers  = $role.TotalUniqueUsers
+        }
+    }
+
+    # JSON is valid JS, so it is emitted as-is; only "</" is broken up so data cannot end the <script> block
+    $jsonData = $rows | ConvertTo-Json -Depth 5 -Compress
+    if (-not $jsonData) { $jsonData = '[]' }
+    if ($jsonData -notmatch '^\s*\[') { $jsonData = "[$jsonData]" }
+    $jsonData = $jsonData -replace '</', '<\/'
+
+    $jsonRoles = $roleRows | ConvertTo-Json -Depth 3 -Compress
+    if (-not $jsonRoles) { $jsonRoles = '[]' }
+    if ($jsonRoles -notmatch '^\s*\[') { $jsonRoles = "[$jsonRoles]" }
+    $jsonRoles = $jsonRoles -replace '</', '<\/'
+
+    $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $totalPrincipals = $rows.Count
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Entra ID Privileged Account Report - $TenantName - $generatedDate</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #333; padding: 20px; }
+.header { background: linear-gradient(135deg, #1a237e, #0d47a1); color: white; padding: 30px; border-radius: 12px; margin-bottom: 20px; }
+.header h1 { font-size: 1.8em; margin-bottom: 5px; }
+.header .meta { opacity: 0.8; font-size: 0.9em; }
+.filters { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.filters h3 { margin-bottom: 12px; color: #1a237e; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.filter-group { display: flex; flex-direction: column; }
+.filter-group label { font-size: 0.8em; font-weight: 600; color: #555; margin-bottom: 4px; }
+.filter-group select, .filter-group input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 0.9em; min-width: 140px; }
+.filter-group input[type="text"] { min-width: 240px; }
+.method-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; }
+.method-filters label { font-size: 0.8em; font-weight: 600; color: #555; margin-right: 8px; }
+.method-logic-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; padding: 4px 10px; background: #f5f5f5; border-radius: 16px; font-size: 0.75em; font-weight: 600; border: 1px solid #ddd; }
+.method-logic-toggle span { padding: 2px 8px; border-radius: 10px; cursor: pointer; color: #777; }
+.method-logic-toggle span.active { background: #1565c0; color: white; }
+.method-logic-toggle span.disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+.method-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: #e3f2fd; border-radius: 16px; font-size: 0.8em; cursor: pointer; user-select: none; border: 1px solid #bbdefb; }
+.method-chip.active { background: #1565c0; color: white; border-color: #1565c0; }
+.btn-reset { padding: 8px 16px; background: #e0e0e0; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
+.btn-reset:hover { background: #bdbdbd; }
+.table-container { background: white; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; margin-bottom: 20px; }
+.table-info { padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #eee; font-size: 0.85em; color: #666; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+thead { background: #1a237e; color: white; position: sticky; top: 0; }
+th { padding: 12px 10px; text-align: left; cursor: pointer; user-select: none; white-space: nowrap; }
+th:hover { background: #283593; }
+th .sort-icon { margin-left: 4px; opacity: 0.5; }
+th.sorted-asc .sort-icon::after { content: ' ▲'; opacity: 1; }
+th.sorted-desc .sort-icon::after { content: ' ▼'; opacity: 1; }
+td { padding: 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+tr:hover { background: #f5f5f5; }
+tr.risk-critical { border-left: 4px solid #d32f2f; }
+tr.risk-high { border-left: 4px solid #f57c00; }
+tr.risk-medium { border-left: 4px solid #fbc02d; }
+tr.risk-low { border-left: 4px solid #388e3c; }
+tr.risk-unknown { border-left: 4px solid #9e9e9e; }
+tr.risk-na { border-left: 4px solid #9e9e9e; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; }
+.badge-critical { background: #ffebee; color: #c62828; }
+.badge-high { background: #fff3e0; color: #e65100; }
+.badge-medium { background: #fffde7; color: #f57f17; }
+.badge-low { background: #e8f5e9; color: #2e7d32; }
+.badge-unknown { background: #f5f5f5; color: #616161; }
+.badge-na { background: #f5f5f5; color: #616161; }
+.badge-enabled { background: #e8f5e9; color: #2e7d32; }
+.badge-disabled { background: #ffebee; color: #c62828; }
+.badge-user { background: #f3e5f5; color: #6a1b9a; }
+.badge-sp { background: #e0f7fa; color: #00695c; }
+.badge-group { background: #e3f2fd; color: #1565c0; }
+.badge-yes { background: #e8f5e9; color: #2e7d32; }
+.badge-no { background: #ffebee; color: #c62828; }
+.role-chip { display: inline-block; padding: 2px 7px; margin: 1px 2px 1px 0; border-radius: 9px; font-size: 0.92em; white-space: nowrap; }
+.role-active { background: #ffebee; color: #b71c1c; }
+.role-pim { background: #f3e5f5; color: #6a1b9a; }
+.role-groupbased { background: #e3f2fd; color: #0d47a1; }
+.role-pimgroup { background: #ede7f6; color: #4527a0; }
+.role-cell { min-width: 300px; max-width: 460px; }
+.notes-cell { min-width: 260px; }
+#principalTable { min-width: 1500px; }
+.muted { color: #757575; font-size: 0.85em; }
+.footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #999; }
+.pii-notice { background: #e8f4fd; border: 1px solid #4f83cc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #17324d; display: flex; align-items: flex-start; gap: 12px; }
+.pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; color: #1565c0; }
+.pii-notice .pii-text strong { display: block; margin-bottom: 4px; color: #0d47a1; }
+.pii-notice .pii-dismiss { margin-left: auto; cursor: pointer; font-size: 1.1em; color: #999; flex-shrink: 0; padding: 0 4px; }
+.pii-notice .pii-dismiss:hover { color: #333; }
+@media (max-width: 768px) { .filter-row { flex-direction: column; } .filter-group select, .filter-group input { min-width: 100%; } }
+.summary-block { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
+.mfa-bar-track { display: flex; height: 28px; border-radius: 6px; overflow: hidden; margin-bottom: 10px; background: #eee; }
+.mfa-bar-segment { height: 100%; transition: width 0.3s; }
+.mfa-bar-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.8em; color: #444; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #eee; }
+.mfa-bar-legend-item { display: flex; align-items: center; gap: 5px; }
+.mfa-bar-legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.summary-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.summary-col { padding: 0 20px; }
+.summary-col:first-child { padding-left: 0; border-right: 2px solid #e0e0e0; }
+.summary-col:last-child { padding-right: 0; }
+.summary-col-header { display: flex; align-items: center; gap: 8px; font-size: 0.9em; font-weight: 700; color: #1a237e; margin-bottom: 12px; }
+.summary-mini-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+.summary-mini-card { background: #f8f9fa; border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 80px; text-align: center; border: 1px solid #e8e8e8; }
+.summary-mini-card .smc-value { font-size: 1.6em; font-weight: 700; }
+.summary-mini-card .smc-label { font-size: 0.72em; color: #666; margin-top: 2px; }
+.summary-footer { margin-top: 14px; padding: 10px 0 4px; border-top: 2px solid #e0e0e0; font-size: 0.88em; font-weight: 500; color: #333; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pie-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.pie-box-title { font-size: 0.9em; font-weight: 700; color: #1a237e; margin-bottom: 10px; }
+.pie-box-inner { display: flex; align-items: center; gap: 16px; }
+.pie-legend { display: flex; flex-direction: column; gap: 5px; }
+.section-title { font-size: 0.9em; font-weight: 700; color: #1a237e; padding: 16px 20px 0; }
+</style>
+</head>
+<body>
+<div class="header">
+<h1>Entra ID Privileged Account Report</h1>
+<div class="meta">Tenant: $TenantName | Generated: $generatedDate | Privileged Principals: $totalPrincipals</div>
+</div>
+
+<div class="pii-notice" id="piiNotice">
+  <span class="pii-icon">&#9888;</span>
+  <div class="pii-text">
+    <strong>Data Privacy Notice (GDPR)</strong>
+    This report contains personal data and a complete map of administrative privilege in the tenant.
+    Store securely, share only with authorised personnel, retain only as long as operationally required, and dispose of securely when no longer needed.
+  </div>
+  <span class="pii-dismiss" onclick="document.getElementById('piiNotice').style.display='none'" title="Dismiss">&#x2715;</span>
+</div>
+
+<div class="summary-block" id="summaryBlock">
+  <div id="mfaBarLabel" class="summary-col-header" style="margin-bottom:8px;"></div>
+  <div class="mfa-bar-track" id="mfaBar"></div>
+  <div class="mfa-bar-legend" id="mfaBarLegend"></div>
+  <div class="summary-columns">
+    <div class="summary-col">
+      <div class="summary-col-header" id="standingColHeader">&#128737; Standing admins</div>
+      <div class="summary-mini-cards" id="standingCards"></div>
+    </div>
+    <div class="summary-col">
+      <div class="summary-col-header" id="pimColHeader">&#9203; PIM-eligible only</div>
+      <div class="summary-mini-cards" id="pimCards"></div>
+    </div>
+  </div>
+  <div class="summary-footer" id="summaryFooter"></div>
+</div>
+
+<div class="summary-block">
+  <div class="pie-row">
+    <div>
+      <div class="pie-box-title">Risk Summary (privileged users)</div>
+      <div class="pie-box-inner">
+        <svg id="riskPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg>
+        <div class="pie-legend" id="riskPieLegend"></div>
+      </div>
+    </div>
+    <div>
+      <div class="pie-box-title">Privilege Paths (role assignments)</div>
+      <div class="pie-box-inner">
+        <svg id="pathPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg>
+        <div class="pie-legend" id="pathPieLegend"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="filters">
+<h3>Filters</h3>
+<div class="filter-row">
+<div class="filter-group"><label>Search (Name / UPN / Role / Group)</label><input type="text" id="searchBox" placeholder="Name, UPN, role, or group"></div>
+<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option value="Critical">Critical</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option><option value="Unknown">Unknown</option><option value="N/A">N/A</option></select></div>
+<div class="filter-group"><label>Principal Type</label><select id="filterType"><option value="">All</option><option value="User">User</option><option value="Service Principal">Service Principal</option><option value="Role-Assignable Group">Role-Assignable Group</option></select></div>
+<div class="filter-group"><label>Account Status</label><select id="filterStatus"><option value="">All</option><option value="Enabled">Enabled</option><option value="Disabled">Disabled</option><option value="N/A">N/A</option></select></div>
+<div class="filter-group"><label>MFA Status</label><select id="filterMfa"><option value="">All</option><option value="Enabled">Enabled</option><option value="Disabled">Disabled</option><option value="Unknown">Unknown</option><option value="N/A">N/A</option></select></div>
+<div class="filter-group"><label>Restricted AU</label><select id="filterAu"><option value="">All</option><option value="Yes">Protected</option><option value="No">Not protected</option><option value="N/A">N/A</option></select></div>
+<div class="filter-group"><label>Assignment Type</label><select id="filterAssignment"><option value="">All</option><option value="Active">Active</option><option value="PIM Eligible">PIM Eligible</option><option value="Group-Based">Group-Based</option><option value="PIM Group Eligible">PIM Group Eligible</option></select></div>
+<div class="filter-group"><label>Role</label><select id="filterRole"><option value="">All</option></select></div>
+<div class="filter-group"><button class="btn-reset" onclick="resetFilters()">Reset All</button></div>
+</div>
+<div class="method-filters">
+<label>MFA Methods:</label>
+<span class="method-chip" data-method="Authenticator" onclick="toggleMethod(this)">Authenticator</span>
+<span class="method-chip" data-method="Phone" onclick="toggleMethod(this)">Phone</span>
+<span class="method-chip" data-method="FIDO2" onclick="toggleMethod(this)">FIDO2</span>
+<span class="method-chip" data-method="Windows Hello" onclick="toggleMethod(this)">Windows Hello</span>
+<span class="method-chip" data-method="Software OATH" onclick="toggleMethod(this)">Software OATH</span>
+<span class="method-chip" data-method="Email" onclick="toggleMethod(this)">Email</span>
+<span class="method-chip" data-method="TAP" onclick="toggleMethod(this)">TAP</span>
+<div class="method-logic-toggle"><span id="modeOr" class="active" onclick="setMethodMode('or')">OR</span><span id="modeAnd" onclick="setMethodMode('and')">AND</span></div>
+<label class="method-only-toggle" style="margin-left:10px;font-size:0.78em;color:#555"><input type="checkbox" id="filterOnlySelectedMethods"> Only selected methods</label>
+</div>
+</div>
+
+<div class="table-container">
+<div class="table-info">Showing <span id="visibleCount">0</span> of <span id="totalCount">0</span> privileged principals</div>
+<div style="overflow-x:auto; max-height: 70vh; overflow-y: auto;">
+<table id="principalTable">
+<thead>
+<tr>
+<th data-col="displayName" onclick="sortTable('displayName')">Display Name<span class="sort-icon"></span></th>
+<th data-col="identifier" onclick="sortTable('identifier')">Identifier<span class="sort-icon"></span></th>
+<th data-col="principalType" onclick="sortTable('principalType')">Type<span class="sort-icon"></span></th>
+<th data-col="accountStatus" onclick="sortTable('accountStatus')">Account<span class="sort-icon"></span></th>
+<th data-col="mfaStatus" onclick="sortTable('mfaStatus')">MFA<span class="sort-icon"></span></th>
+<th data-col="mfaMethods" onclick="sortTable('mfaMethods')">MFA Methods<span class="sort-icon"></span></th>
+<th data-col="auProtected" onclick="sortTable('auProtected')" title="Protected by a restricted administrative unit">Restricted AU<span class="sort-icon"></span></th>
+<th data-col="roleCount" onclick="sortTable('roleCount')">#<span class="sort-icon"></span></th>
+<th data-col="rolesText" onclick="sortTable('rolesText')">Roles<span class="sort-icon"></span></th>
+<th data-col="mfaTrust" onclick="sortTable('mfaTrust')" title="Cross-tenant inbound MFA trust for a guest's home tenant">MFA Trust<span class="sort-icon"></span></th>
+<th data-col="riskLevel" onclick="sortTable('riskLevel')">Risk<span class="sort-icon"></span></th>
+<th data-col="riskNotes" onclick="sortTable('riskNotes')">Risk Notes<span class="sort-icon"></span></th>
+</tr>
+</thead>
+<tbody id="tableBody"></tbody>
+</table>
+</div>
+</div>
+
+<div class="table-container">
+<div class="section-title">Role Distribution</div>
+<div class="table-info">All directory roles with at least one assignment</div>
+<div style="overflow-x:auto; max-height: 50vh; overflow-y: auto;">
+<table id="roleTable">
+<thead>
+<tr>
+<th data-rcol="roleName" onclick="sortRoles('roleName')">Role<span class="sort-icon"></span></th>
+<th data-rcol="type" onclick="sortRoles('type')">Type<span class="sort-icon"></span></th>
+<th data-rcol="active" onclick="sortRoles('active')">Active<span class="sort-icon"></span></th>
+<th data-rcol="eligible" onclick="sortRoles('eligible')">PIM Eligible<span class="sort-icon"></span></th>
+<th data-rcol="groupBased" onclick="sortRoles('groupBased')">Group-Based<span class="sort-icon"></span></th>
+<th data-rcol="pimGroup" onclick="sortRoles('pimGroup')">PIM Group<span class="sort-icon"></span></th>
+<th data-rcol="totalUsers" onclick="sortRoles('totalUsers')">Unique Principals<span class="sort-icon"></span></th>
+</tr>
+</thead>
+<tbody id="roleTableBody"></tbody>
+</table>
+</div>
+</div>
+
+<div class="footer">
+Generated by I.D.E.A. 002 - Entra ID Privileged Account Report | Per-Torben Sørensen
+</div>
+
+<script>
+const DATA = $jsonData;
+const ROLES = $jsonRoles;
+let sortCol = 'riskLevel';
+let sortDir = 'asc';
+let roleSortCol = 'totalUsers';
+let roleSortDir = 'desc';
+let activeMethodFilters = [];
+let methodFilterMode = 'or';
+let onlySelectedMethods = false;
+const riskOrder = { Critical: 0, High: 1, Medium: 2, Low: 3, Unknown: 4, 'N/A': 5 };
+const roleClassMap = { 'Active': 'role-active', 'PIM Eligible': 'role-pim', 'Group-Based': 'role-groupbased', 'PIM Group Eligible': 'role-pimgroup' };
+const typeBadgeMap = { 'User': 'badge-user', 'Service Principal': 'badge-sp', 'Role-Assignable Group': 'badge-group' };
+
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function riskKey(r) { return (r === 'N/A' ? 'na' : r.toLowerCase()); }
+
+function renderTable() {
+    const search = document.getElementById('searchBox').value.toLowerCase();
+    const fRisk = document.getElementById('filterRisk').value;
+    const fType = document.getElementById('filterType').value;
+    const fStatus = document.getElementById('filterStatus').value;
+    const fMfa = document.getElementById('filterMfa').value;
+    const fAu = document.getElementById('filterAu').value;
+    const fAssign = document.getElementById('filterAssignment').value;
+    const fRole = document.getElementById('filterRole').value;
+
+    const filtered = DATA.filter(r => {
+        if (search) {
+            const hay = (r.displayName + ' ' + r.identifier + ' ' + r.rolesText + ' ' + r.roles.map(x => x.g).join(' ')).toLowerCase();
+            if (!hay.includes(search)) return false;
+        }
+        if (fRisk && r.riskLevel !== fRisk) return false;
+        if (fType && r.principalType !== fType) return false;
+        if (fStatus && r.accountStatus !== fStatus) return false;
+        if (fMfa && r.mfaStatus !== fMfa) return false;
+        if (fAu && r.auProtected !== fAu) return false;
+        if (fAssign && !r.assignmentTags.includes(fAssign)) return false;
+        if (fRole && !r.roles.some(x => x.n === fRole)) return false;
+        if (activeMethodFilters.length > 0) {
+            const userMethods = Array.isArray(r.methodTags) ? r.methodTags : [];
+            if (onlySelectedMethods && !userMethods.every(m => activeMethodFilters.includes(m))) return false;
+            if (methodFilterMode === 'and') {
+                if (!activeMethodFilters.every(m => userMethods.includes(m))) return false;
+            } else if (!activeMethodFilters.some(m => userMethods.includes(m))) return false;
+        }
+        return true;
+    });
+
+    filtered.sort((a, b) => {
+        let va = a[sortCol];
+        let vb = b[sortCol];
+        if (sortCol === 'riskLevel') { va = riskOrder[va] ?? 9; vb = riskOrder[vb] ?? 9; }
+        else if (sortCol === 'roleCount') { va = va || 0; vb = vb || 0; }
+        else { va = (va || '').toString().toLowerCase(); vb = (vb || '').toString().toLowerCase(); }
+        if (va < vb) return sortDir === 'asc' ? -1 : 1;
+        if (va > vb) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    document.getElementById('visibleCount').textContent = filtered.length;
+    document.getElementById('totalCount').textContent = DATA.length;
+
+    document.getElementById('tableBody').innerHTML = filtered.map(r => {
+        const k = riskKey(r.riskLevel);
+        const roleHtml = r.roles.length === 0
+            ? '<span class="muted">No direct assignments</span>'
+            : r.roles.map(x => '<span class="role-chip ' + (roleClassMap[x.t] || '') + '" title="' + esc(x.t + (x.g ? ' via ' + x.g : '')) + '">' + esc(x.n) + (x.g ? ' <span class="muted">&#8594; ' + esc(x.g) + '</span>' : '') + '</span>').join('');
+        const auHtml = r.auProtected === 'N/A'
+            ? '<span class="badge badge-na">N/A</span>'
+            : '<span class="badge badge-' + (r.auProtected === 'Yes' ? 'yes' : 'no') + '">' + r.auProtected + '</span>' + (r.auName ? ' <span class="muted">' + esc(r.auName) + '</span>' : '');
+        return '<tr class="risk-' + k + '">' +
+            '<td>' + esc(r.displayName) + '</td>' +
+            '<td>' + esc(r.identifier) + '</td>' +
+            '<td><span class="badge ' + (typeBadgeMap[r.principalType] || 'badge-na') + '">' + esc(r.principalType) + '</span></td>' +
+            '<td>' + (r.accountStatus === 'N/A' ? '<span class="badge badge-na">N/A</span>' : '<span class="badge badge-' + r.accountStatus.toLowerCase() + '">' + r.accountStatus + '</span>') + '</td>' +
+            '<td>' + (r.mfaStatus === 'Enabled' || r.mfaStatus === 'Disabled' ? '<span class="badge badge-' + r.mfaStatus.toLowerCase() + '">' + r.mfaStatus + '</span>' : '<span class="badge badge-na">' + esc(r.mfaStatus) + '</span>') + '</td>' +
+            '<td>' + esc(r.mfaMethods) + (r.phoneNumbers ? '<div class="muted">' + esc(r.phoneNumbers) + '</div>' : '') + '</td>' +
+            '<td>' + auHtml + '</td>' +
+            '<td>' + r.roleCount + '</td>' +
+            '<td class="role-cell">' + roleHtml + '</td>' +
+            '<td>' + esc(r.mfaTrust === 'N/A' ? '' : r.mfaTrust) + (r.homeTenant ? ' <span class="muted">(' + esc(r.homeTenant) + ')</span>' : '') + '</td>' +
+            '<td><span class="badge badge-' + k + '">' + esc(r.riskLevel) + '</span></td>' +
+            '<td class="notes-cell">' + esc(r.riskNotes) + '</td></tr>';
+    }).join('');
+
+    document.querySelectorAll('#principalTable th').forEach(th => th.classList.remove('sorted-asc', 'sorted-desc'));
+    const th = document.querySelector('#principalTable th[data-col="' + sortCol + '"]');
+    if (th) th.classList.add(sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+}
+
+function renderRoleTable() {
+    const sorted = ROLES.slice().sort((a, b) => {
+        let va = a[roleSortCol];
+        let vb = b[roleSortCol];
+        if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb || '').toLowerCase(); }
+        if (va < vb) return roleSortDir === 'asc' ? -1 : 1;
+        if (va > vb) return roleSortDir === 'asc' ? 1 : -1;
+        return 0;
+    });
+    document.getElementById('roleTableBody').innerHTML = sorted.map(r =>
+        '<tr><td>' + esc(r.roleName) + '</td><td>' + esc(r.type) + '</td><td>' + r.active + '</td><td>' + r.eligible +
+        '</td><td>' + r.groupBased + '</td><td>' + r.pimGroup + '</td><td><strong>' + r.totalUsers + '</strong></td></tr>'
+    ).join('');
+
+    document.querySelectorAll('#roleTable th').forEach(th => th.classList.remove('sorted-asc', 'sorted-desc'));
+    const th = document.querySelector('#roleTable th[data-rcol="' + roleSortCol + '"]');
+    if (th) th.classList.add(roleSortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+}
+
+function sortTable(col) {
+    if (sortCol === col) { sortDir = sortDir === 'asc' ? 'desc' : 'asc'; }
+    else { sortCol = col; sortDir = 'asc'; }
+    renderTable();
+}
+
+function sortRoles(col) {
+    if (roleSortCol === col) { roleSortDir = roleSortDir === 'asc' ? 'desc' : 'asc'; }
+    else { roleSortCol = col; roleSortDir = (col === 'roleName' || col === 'type') ? 'asc' : 'desc'; }
+    renderRoleTable();
+}
+
+function toggleMethod(el) {
+    const m = el.dataset.method;
+    el.classList.toggle('active');
+    if (el.classList.contains('active')) { activeMethodFilters.push(m); }
+    else { activeMethodFilters = activeMethodFilters.filter(x => x !== m); }
+    updateMethodModeToggle();
+    renderTable();
+}
+
+function setMethodMode(mode) {
+    if (activeMethodFilters.length < 2) { return; }
+    methodFilterMode = mode;
+    document.getElementById('modeOr').classList.toggle('active', mode === 'or');
+    document.getElementById('modeAnd').classList.toggle('active', mode === 'and');
+    renderTable();
+}
+
+function updateMethodModeToggle() {
+    const allowMultiMode = activeMethodFilters.length >= 2;
+    const modeOrEl = document.getElementById('modeOr');
+    const modeAndEl = document.getElementById('modeAnd');
+    modeOrEl.classList.toggle('disabled', !allowMultiMode);
+    modeAndEl.classList.toggle('disabled', !allowMultiMode);
+    if (!allowMultiMode) {
+        methodFilterMode = 'or';
+        modeOrEl.classList.add('active');
+        modeAndEl.classList.remove('active');
+    }
+}
+
+function populateRoleFilter() {
+    const names = [...new Set(DATA.flatMap(r => r.roles.map(x => x.n)))].sort();
+    const sel = document.getElementById('filterRole');
+    names.forEach(n => {
+        const o = document.createElement('option');
+        o.value = n; o.textContent = n;
+        sel.appendChild(o);
+    });
+}
+
+function drawPie(svgId, legendId, segs) {
+    const svgEl = document.getElementById(svgId);
+    const lgdEl = document.getElementById(legendId);
+    const tot = segs.reduce((s, d) => s + d.v, 0);
+    if (!svgEl || !lgdEl || tot === 0) return;
+    let ang = -Math.PI / 2, paths = '', lgd = '';
+    segs.forEach(s => {
+        const frac = s.v / tot;
+        const end = ang + frac * 2 * Math.PI;
+        if (frac >= 0.9999) {
+            paths += '<circle cx="0" cy="0" r="1" fill="' + s.c + '"/>';
+        } else {
+            const la = frac > 0.5 ? 1 : 0;
+            const x1 = Math.cos(ang).toFixed(5), y1 = Math.sin(ang).toFixed(5);
+            const x2 = Math.cos(end).toFixed(5), y2 = Math.sin(end).toFixed(5);
+            paths += '<path d="M0,0 L' + x1 + ',' + y1 + ' A1,1,0,' + la + ',1,' + x2 + ',' + y2 + ' Z" fill="' + s.c + '" stroke="white" stroke-width="0.03"/>';
+        }
+        lgd += '<div style="display:flex;align-items:center;gap:5px;font-size:0.78em;line-height:1.5">' +
+               '<span style="width:10px;height:10px;border-radius:2px;background:' + s.c + ';flex-shrink:0;display:inline-block"></span>' +
+               esc(s.l) + ': <strong>' + s.v + '</strong></div>';
+        ang = end;
+    });
+    svgEl.innerHTML = paths;
+    lgdEl.innerHTML = lgd;
+}
+
+function renderSummary() {
+    const isPhishRes = m => m.includes('FIDO2') || m.includes('Windows Hello');
+    const hasAuthApp = m => m.includes('Authenticator');
+    const hasWeak = m => m.includes('Phone') || m.includes('Email');
+    const users = DATA.filter(r => r.principalType === 'User' && r.accountStatus === 'Enabled');
+    const total = users.length;
+
+    const barNoMFA = users.filter(r => r.mfaStatus === 'Disabled').length;
+    const barUnknown = users.filter(r => r.mfaStatus === 'Unknown').length;
+    const barWeak = users.filter(r => r.mfaStatus === 'Enabled' && hasWeak(r.methodTags) && !isPhishRes(r.methodTags) && !hasAuthApp(r.methodTags)).length;
+    const barAuth = users.filter(r => r.mfaStatus === 'Enabled' && hasAuthApp(r.methodTags) && !isPhishRes(r.methodTags)).length;
+    const barPhish = users.filter(r => r.mfaStatus === 'Enabled' && isPhishRes(r.methodTags)).length;
+    const barOther = total - barNoMFA - barUnknown - barWeak - barAuth - barPhish;
+    const pct = n => total > 0 ? (n / total * 100).toFixed(1) : 0;
+    const segments = [
+        { n: barNoMFA, color: '#d32f2f', label: 'No MFA' },
+        { n: barWeak, color: '#f57c00', label: 'Weak only (phone/email)' },
+        { n: barAuth, color: '#fbc02d', label: 'Authenticator only' },
+        { n: barPhish, color: '#388e3c', label: 'Phishing-resistant' },
+        { n: barUnknown, color: '#9e9e9e', label: 'Unknown' }
+    ];
+    if (barOther > 0) segments.push({ n: barOther, color: '#607d8b', label: 'Other MFA' });
+    document.getElementById('mfaBarLabel').textContent = 'MFA method distribution - enabled privileged users (' + total + ')';
+    document.getElementById('mfaBar').innerHTML = segments.filter(s => s.n > 0).map(s =>
+        '<div class="mfa-bar-segment" style="width:' + pct(s.n) + '%;background:' + s.color + '" title="' + s.label + ': ' + s.n + '"></div>'
+    ).join('');
+    document.getElementById('mfaBarLegend').innerHTML = segments.filter(s => s.n > 0).map(s =>
+        '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + s.label + ': <strong>' + s.n + '</strong> (' + pct(s.n) + '%)</span>'
+    ).join('');
+
+    const mcStyles = {
+        bad: n => n > 0 ? { bg: '#ffebee', fg: '#c62828' } : { bg: '#e8f5e9', fg: '#388e3c' },
+        warn: n => n > 0 ? { bg: '#fff3e0', fg: '#f57c00' } : { bg: '#e8f5e9', fg: '#388e3c' }
+    };
+    const mc = (val, tot, lbl, s) => '<div class="summary-mini-card" style="background:' + s.bg + '"><div class="smc-value" style="color:' + s.fg + '">' + val + '<span style="font-size:0.58em;font-weight:400;color:#888"> / ' + tot + '</span></div><div class="smc-label">' + lbl + '</div></div>';
+
+    const isStanding = r => r.assignmentTags.includes('Active') || r.assignmentTags.includes('Group-Based');
+    const standing = users.filter(isStanding);
+    const pimOnly = users.filter(r => !isStanding(r) && r.assignmentTags.length > 0);
+
+    const fillCol = (headerId, cardsId, icon, label, set) => {
+        const noMfa = set.filter(r => r.mfaStatus === 'Disabled').length;
+        const phone = set.filter(r => r.methodTags.includes('Phone')).length;
+        const noAu = set.filter(r => r.auProtected === 'No').length;
+        document.getElementById(headerId).innerHTML = icon + ' ' + label + ' (' + set.length + ')';
+        document.getElementById(cardsId).innerHTML =
+            mc(noMfa, set.length, 'Without MFA', mcStyles.bad(noMfa)) +
+            mc(phone, set.length, 'Phone MFA', mcStyles.warn(phone)) +
+            mc(noAu, set.length, 'No restricted AU', mcStyles.warn(noAu));
+    };
+    fillCol('standingColHeader', 'standingCards', '&#128737;', 'Standing admins', standing);
+    fillCol('pimColHeader', 'pimCards', '&#9203;', 'PIM-eligible only', pimOnly);
+
+    const sps = DATA.filter(r => r.principalType === 'Service Principal').length;
+    const grps = DATA.filter(r => r.principalType === 'Role-Assignable Group').length;
+    const disabled = DATA.filter(r => r.principalType === 'User' && r.accountStatus === 'Disabled').length;
+    document.getElementById('summaryFooter').innerHTML = '<span>Service principals with roles: <strong>' + sps +
+        '</strong> \xb7 Role-assignable groups: <strong>' + grps +
+        '</strong> \xb7 Disabled privileged users: <strong>' + disabled +
+        '</strong> \xb7 Roles in use: <strong>' + ROLES.length + '</strong></span>';
+
+    const rCounts = {};
+    DATA.filter(r => r.principalType === 'User').forEach(r => { rCounts[r.riskLevel] = (rCounts[r.riskLevel] || 0) + 1; });
+    const rColors = { Critical: '#d32f2f', High: '#f57c00', Medium: '#fbc02d', Low: '#388e3c', Unknown: '#9e9e9e' };
+    drawPie('riskPie', 'riskPieLegend',
+        ['Critical', 'High', 'Medium', 'Low', 'Unknown'].filter(k => rCounts[k]).map(k => ({ l: k, v: rCounts[k], c: rColors[k] })));
+
+    const pCounts = {};
+    DATA.forEach(r => r.roles.forEach(x => { pCounts[x.t] = (pCounts[x.t] || 0) + 1; }));
+    const pColors = { 'Active': '#c62828', 'PIM Eligible': '#6a1b9a', 'Group-Based': '#1565c0', 'PIM Group Eligible': '#4527a0' };
+    drawPie('pathPie', 'pathPieLegend',
+        ['Active', 'PIM Eligible', 'Group-Based', 'PIM Group Eligible'].filter(k => pCounts[k]).map(k => ({ l: k, v: pCounts[k], c: pColors[k] })));
+}
+
+function resetFilters() {
+    ['searchBox', 'filterRisk', 'filterType', 'filterStatus', 'filterMfa', 'filterAu', 'filterAssignment', 'filterRole']
+        .forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('filterOnlySelectedMethods').checked = false;
+    activeMethodFilters = [];
+    methodFilterMode = 'or';
+    onlySelectedMethods = false;
+    document.getElementById('modeOr').classList.add('active');
+    document.getElementById('modeAnd').classList.remove('active');
+    document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
+    updateMethodModeToggle();
+    renderTable();
+}
+
+document.getElementById('searchBox').addEventListener('input', renderTable);
+document.querySelectorAll('.filters select').forEach(s => s.addEventListener('change', renderTable));
+document.getElementById('filterOnlySelectedMethods').addEventListener('change', function (e) {
+    onlySelectedMethods = e.target.checked;
+    renderTable();
+});
+populateRoleFilter();
+updateMethodModeToggle();
+renderTable();
+renderRoleTable();
+renderSummary();
+</script>
+</body>
+</html>
+"@
+
+    $html | Out-File -FilePath $OutputPath -Encoding UTF8 -Force
+    Write-Log "HTML report exported to: $OutputPath" -Level "SUCCESS"
 }
 
 #endregion
@@ -3004,16 +3742,24 @@ try {
     Write-Host ""
     
     # ============================================================================
-    # PART 4: CSV EXPORT PROMPT
+    # PART 4: EXPORT PROMPT
     # ============================================================================
-    Write-Host "Would you like to export this report to CSV? (Y/N): " -NoNewline -ForegroundColor Yellow
+    Write-Host "Export options:" -ForegroundColor Yellow
+    Write-Host "  [1] CSV (role distribution + user status)" -ForegroundColor White
+    Write-Host "  [2] Interactive HTML report" -ForegroundColor White
+    Write-Host "  [3] Both" -ForegroundColor White
+    Write-Host "  [4] None" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Select an option (1-4): " -NoNewline -ForegroundColor Yellow
     $response = Read-Host
-    $exportToCsv = $response -match '^[Yy]'
-    
-    # Export to CSV if requested
-    if ($exportToCsv) {
-        # Create exports directory if it doesn't exist
-        $exportDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) "IDEA-002-FindAllAdmins\exports"
+
+    $exportToCsv = $response -in @('1', '3')
+    $exportToHtml = $response -in @('2', '3')
+
+    $exportDirectory = $null
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    if ($exportToCsv -or $exportToHtml) {
+        $exportDirectory = Join-Path $PSScriptRoot "exports"
         if (-not (Test-Path $exportDirectory)) {
             try {
                 New-Item -ItemType Directory -Path $exportDirectory -Force | Out-Null
@@ -3026,9 +3772,10 @@ try {
                 $exportDirectory = $LogDirectory
             }
         }
-        
-        # Generate timestamp for both files
-        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    }
+
+    # Export to CSV if requested
+    if ($exportToCsv) {
         $roleDistributionPath = Join-Path $exportDirectory "RoleDistribution-$timestamp.csv"
         $userStatusPath = Join-Path $exportDirectory "UserStatus-$timestamp.csv"
         
@@ -3304,6 +4051,51 @@ try {
         Write-Host "Export Summary:" -ForegroundColor Cyan
         Write-Host "  Role Distribution: $($roleDistributionData.Count) roles" -ForegroundColor White
         Write-Host "  User Status: $($exportData.Count) assignments" -ForegroundColor White
+        Write-Host ""
+    }
+
+    # ============================================================================
+    # EXPORT 3: INTERACTIVE HTML REPORT
+    # ============================================================================
+    if ($exportToHtml) {
+        $tenantName = "Unknown"
+        try {
+            $org = Get-MgOrganization -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($org -and $org.DisplayName) { $tenantName = $org.DisplayName }
+        }
+        catch { }
+
+        $safeTenantName = $tenantName -replace '[^\w\-]', '_'
+        $htmlPath = Join-Path $exportDirectory "PrivilegedAccountReport-$safeTenantName-$timestamp.html"
+
+        Write-Log "Generating interactive HTML report..." -Level "INFO"
+        New-PrivilegedAccountHtmlReport -PrivilegedUsers $privilegedUsers `
+            -ServicePrincipals $privilegedServicePrincipals `
+            -PrivilegedGroups $privilegedGroups `
+            -RoleStats $roleStats `
+            -OutputPath $htmlPath `
+            -TenantName $tenantName `
+            -IncludeGroupAssignments $IncludeGroups
+
+        if (-not (Test-Path $htmlPath)) {
+            throw "HTML report generation failed - no file was written to $htmlPath"
+        }
+
+        $htmlFullPath = (Resolve-Path $htmlPath).Path
+        Write-Host "✓ HTML report exported: $htmlFullPath" -ForegroundColor Green
+
+        $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        if (-not (Test-Path $edgePath)) {
+            $edgePath = "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        }
+        if (Test-Path $edgePath) {
+            $fileUri = ([System.Uri]$htmlFullPath).AbsoluteUri
+            Start-Process -FilePath $edgePath -ArgumentList "--new-window", $fileUri
+            Write-Log "Report opened in Edge: $fileUri" -Level "INFO"
+        }
+        else {
+            Write-Log "Edge not found. Open manually: $htmlFullPath" -Level "WARNING"
+        }
         Write-Host ""
     }
     

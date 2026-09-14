@@ -33,6 +33,7 @@ Each privileged user receives a risk level:
 - **Automated risk scoring** eliminates manual security assessment
 - **Deduplication logic** prevents counting the same permission multiple times
 - **CSV exports** for compliance reporting and tracking remediation progress
+- **Interactive HTML report** with dashboards, filters and sortable tables (same style as I.D.E.A. 004)
 - **Service principal inclusion** covers non-human admin accounts
 
 ## Prerequisites
@@ -104,12 +105,14 @@ This creates a certificate-based app registration with all required permissions 
 .\Get-PrivilegedAccountReport.ps1
 ```
 
-### Export to CSV
+### Export the Results
 ```powershell
-# After running, you'll be prompted to export to CSV
-# Two files are created in the exports/ subfolder:
-# - RoleDistribution-[timestamp].csv (roles/groups with counts)
-# - UserStatus-[timestamp].csv (detailed per-user report)
+# After the on-screen report you are prompted for an export format:
+#   [1] CSV   - RoleDistribution-[timestamp].csv + UserStatus-[timestamp].csv
+#   [2] HTML  - PrivilegedAccountReport-[tenant]-[timestamp].html (interactive, opens in Edge)
+#   [3] Both
+#   [4] None
+# All files are written to the exports/ subfolder.
 ```
 
 ### Return Data for Further Processing
@@ -171,6 +174,17 @@ Per-user detailed report:
 - **AUProtected**: "Yes" or "No" (RMAU membership)
 - **AUName**: Name of Restricted AU (if protected)
 - **RiskLevel**: "Critical (No MFA)", "High (Phone MFA + No AU)", "Medium (MFA, No AU)", "Medium (Phone MFA, Has AU)", "Low (Secure)", or "N/A"
+
+### HTML Report (exports/ subfolder)
+
+`PrivilegedAccountReport-[tenant]-[timestamp].html` is a self-contained, offline interactive report (same style as I.D.E.A. 004). It opens automatically in Microsoft Edge and contains:
+
+- **MFA method distribution bar** across all enabled privileged users (no MFA / weak / Authenticator only / phishing-resistant / unknown)
+- **Standing admins vs PIM-eligible only** mini cards: without MFA, phone MFA, no restricted AU
+- **Risk Summary pie** and **Privilege Paths pie** (Active / PIM Eligible / Group-Based / PIM Group Eligible)
+- **Principal table** – one row per user, service principal and role-assignable group, with sortable columns and filters for risk, principal type, account status, MFA status, restricted AU, assignment type, role and MFA method (OR/AND logic)
+- **Role Distribution table** – sortable role statistics matching the CSV export
+- **GDPR data privacy notice** – the report contains personal data and a full map of administrative privilege, so treat it as sensitive
 
 ## Understanding Risk Levels
 
@@ -270,9 +284,10 @@ IDEA-002-FindAllAdmins/
 ├── Create-PrivilegedAccountReportApp.ps1 # Helper for app registration
 ├── README.md                             # This file
 ├── Logs/                                 # Execution logs (auto-created)
-└── exports/                              # CSV exports (auto-created)
+└── exports/                              # Report exports (auto-created)
     ├── RoleDistribution-[timestamp].csv
-    └── UserStatus-[timestamp].csv
+    ├── UserStatus-[timestamp].csv
+    └── PrivilegedAccountReport-[tenant]-[timestamp].html
 ```
 
 ## Author
