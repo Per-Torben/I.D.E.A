@@ -2,14 +2,14 @@
 .github/
 
 # Logs directory
-Logs/
+[Ll]ogs/
 
 # Export directories
 exports/
 CA-Export/
 
 # Test artifacts
-/tests/
+tests/
 
 # PowerShell debugging
 *.pdb
