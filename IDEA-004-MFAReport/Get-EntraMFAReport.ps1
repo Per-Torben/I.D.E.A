@@ -109,12 +109,21 @@
     Optionally uses Exchange Online for authoritative mailbox-type detection
     (shared/room/equipment) via menu option [2].
 
+    Existing connections
+    --------------------
+    Both services reuse whatever connection is already open in the session. Connect first with
+    Connect-MgGraph and/or Connect-ExchangeOnline - certificate app-only auth included - and the
+    script will use those sessions and leave them open on exit. Menu option [1] asks before
+    replacing an existing Graph connection, and app-only tokens are validated with a live Graph
+    probe rather than a delegated scope check.
+
     Note on Graph vs Exchange
     -------------------------
     Microsoft.Graph and ExchangeOnlineManagement ship different MSAL versions and cannot both
-    sign in interactively in one process - whichever authenticates second fails. All Exchange
-    work therefore runs in a separate PowerShell process (see Get-ExoMailboxType), and
-    ExchangeOnlineManagement is never imported into this process.
+    sign in INTERACTIVELY in one process - whichever authenticates second fails. An Exchange
+    session the caller already established is reused directly and is unaffected. Only when no
+    session exists does the interactive Exchange sign-in run in a separate PowerShell process
+    (see Get-ExoMailboxType), so ExchangeOnlineManagement is never imported here on that path.
 
     TROUBLESHOOTING - PERMISSION / CONSENT ERRORS (403 Authorization_RequestDenied):
     ---------------------------------------------------------------------------------
@@ -201,6 +210,9 @@ foreach ($module in $requiredModules) {
 # Populated by menu option [2] from a child process; ExchangeOnlineManagement is never
 # imported here because its MSAL version conflicts with the Graph SDK's.
 $script:MailboxTypes = $null
+
+# Only connections this script opened are torn down on exit.
+$script:GraphConnectedByScript = $false
 
 # ============================================================================
 # Logging
@@ -375,11 +387,31 @@ function Show-Banner {
     Write-Host ""
 }
 
+function Get-ExoConnection {
+    <#
+    .SYNOPSIS
+        Returns the active Exchange Online connection for this process, or $null.
+    .DESCRIPTION
+        Only probes when ExchangeOnlineManagement is already loaded. Calling
+        Get-ConnectionInformation on an unloaded module auto-imports it, and its MSAL version
+        conflicts with the Graph SDK's. An existing session established by the caller
+        (app-only certificate auth in particular) is safe to reuse and is preferred.
+    #>
+    if (-not (Get-Module ExchangeOnlineManagement)) { return $null }
+
+    try {
+        Get-ConnectionInformation -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Connected' -or -not $_.State } |
+            Select-Object -First 1
+    }
+    catch { $null }
+}
+
 function Show-ConnectionStatus {
     $graphStatus = "Not connected"
     $graphColor = "Red"
-    $exoStatus = "Not loaded (heuristics will be used)"
-    $exoColor = "Yellow"
+    $exoStatus = "Not connected"
+    $exoColor = "Red"
 
     $ctx = Get-MgContext -ErrorAction SilentlyContinue
     if ($ctx) {
@@ -390,15 +422,23 @@ function Show-ConnectionStatus {
                 Select-Object -First 1).Id
         } catch { $initialDomain = $null }
         $domainLabel = if ($initialDomain) { $initialDomain } else { $ctx.TenantId }
-        $graphStatus = "Connected ($domainLabel)"
+        $authLabel = if ($ctx.AuthType -eq 'AppOnly') { ", app-only" } else { "" }
+        $graphStatus = "Connected ($domainLabel$authLabel)"
         $graphColor = "Green"
     }
 
-    # Deliberately not calling Get-ConnectionInformation: it would auto-import
-    # ExchangeOnlineManagement into this process and break Graph's MSAL.
-    if ($script:MailboxTypes) {
-        $exoStatus = "Mailbox types loaded ($($script:MailboxTypes.Count) mailboxes)"
+    $exo = Get-ExoConnection
+    if ($exo) {
+        $orgLabel = if ($exo.Organization) { $exo.Organization }
+                    elseif ($exo.UserPrincipalName) { $exo.UserPrincipalName }
+                    else { $exo.TenantID }
+        $authLabel = if ($exo.CertificateAuthentication) { ", app-only" } else { "" }
+        $exoStatus = "Connected ($orgLabel$authLabel)"
         $exoColor = "Green"
+    }
+    elseif ($script:MailboxTypes) {
+        $exoStatus = "Not connected (mailbox data cached from earlier retrieval)"
+        $exoColor = "Yellow"
     }
 
     Write-Host "  Connection Status:" -ForegroundColor Yellow
@@ -433,7 +473,7 @@ function Show-MainMenu {
     Show-ConnectionStatus
     Show-StaleFilesWarning
     Write-Host "  [1] Connect to Microsoft Graph" -ForegroundColor Green
-    Write-Host "  [2] Load Exchange Online mailbox types (optional)" -ForegroundColor Green
+    Write-Host "  [2] Connect to Exchange Online (optional)" -ForegroundColor Green
     Write-Host "  [3] Generate MFA Report" -ForegroundColor Green
     Write-Host "  [Q] Quit" -ForegroundColor Gray
     Write-Host ""
@@ -632,6 +672,22 @@ function Connect-ReportGraph {
     )
 
     Write-Host ""
+
+    # An app-only connection cannot be recreated here, so never discard one silently.
+    $existing = Get-MgContext -ErrorAction SilentlyContinue
+    if ($existing) {
+        $label = if ($existing.AuthType -eq 'AppOnly') { "app-only (AppId $($existing.ClientId))" } else { $existing.Account }
+        Write-Host "  Already connected to Microsoft Graph: $label" -ForegroundColor Green
+        Write-Host "  Tenant: $($existing.TenantId)" -ForegroundColor Gray
+        Write-Host ""
+        $replace = Read-Host "  Replace this connection with an interactive sign-in? (Y/N)"
+        if ($replace -notmatch '^[Yy]') {
+            Write-Host "  Keeping the existing connection." -ForegroundColor DarkGray
+            Write-Log "Kept existing Graph connection (AuthType: $($existing.AuthType))" -Level "INFO"
+            return
+        }
+    }
+
     Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Yellow
     Write-Host "  Required scopes: $($requiredScopes -join ', ')" -ForegroundColor Gray
     Write-Host ""
@@ -639,6 +695,7 @@ function Connect-ReportGraph {
     try {
         Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
         Connect-MgGraph -Scopes $requiredScopes -NoWelcome -ContextScope Process -ErrorAction Stop
+        $script:GraphConnectedByScript = $true
 
         # WAM can cause Get-MgContext to return null immediately after connect.
         # Retry briefly to let the token propagate.
@@ -688,18 +745,63 @@ function Connect-ReportGraph {
     }
 }
 
+function Get-ExoMailboxTypeInSession {
+    <#
+    .SYNOPSIS
+        Queries mailbox types using the Exchange Online session already open in this process.
+    .OUTPUTS
+        [hashtable] lowercase UPN -> RecipientTypeDetails, or $null on failure.
+    #>
+    try {
+        Write-Host "  Retrieving mailbox types..." -ForegroundColor Yellow
+        $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop
+
+        $map = @{}
+        foreach ($mbx in $mailboxes) {
+            if ($mbx.UserPrincipalName) { $map[$mbx.UserPrincipalName.ToLower()] = $mbx.RecipientTypeDetails }
+        }
+
+        $typeSummary = ($mailboxes | Group-Object RecipientTypeDetails |
+            ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', '
+
+        Write-Host "  ✓ Retrieved $($map.Count) mailbox types from Exchange Online" -ForegroundColor Green
+        Write-Log "Mailbox types retrieved: $typeSummary" -Level "SUCCESS"
+        return $map
+    }
+    catch {
+        Write-Host "  ✗ Could not retrieve mailbox types: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "Mailbox type retrieval failed: $($_.Exception.Message)" -Level "WARNING"
+        return $null
+    }
+}
+
 function Get-ExoMailboxType {
     <#
     .SYNOPSIS
-        Retrieves mailbox RecipientTypeDetails from Exchange Online in a separate process.
+        Retrieves mailbox RecipientTypeDetails from Exchange Online.
     .DESCRIPTION
-        Microsoft.Graph and ExchangeOnlineManagement ship different Microsoft.Identity.Client
-        versions and cannot both sign in interactively in one process: whichever authenticates
-        second fails inside MSAL. ExchangeOnlineManagement is therefore never loaded into this
-        process at all - a child process collects the mailbox types and hands them back as CSV.
+        Prefers an Exchange Online session that already exists in this process - typically an
+        app-only certificate connection established by the caller - and queries it directly.
+
+        Only when no session exists does it fall back to a child process. Microsoft.Graph and
+        ExchangeOnlineManagement ship different Microsoft.Identity.Client versions and cannot
+        both sign in interactively in one process: whichever authenticates second fails inside
+        MSAL. A child process gives each module its own MSAL. Reusing a session the caller
+        already established is safe because no second interactive sign-in takes place.
     .OUTPUTS
         [hashtable] lowercase UPN -> RecipientTypeDetails, or $null when unavailable.
     #>
+
+    $existing = Get-ExoConnection
+    if ($existing) {
+        $orgLabel = if ($existing.Organization) { $existing.Organization }
+                    elseif ($existing.UserPrincipalName) { $existing.UserPrincipalName }
+                    else { $existing.TenantID }
+        Write-Host ""
+        Write-Host "  Using existing Exchange Online connection ($orgLabel)" -ForegroundColor Green
+        Write-Log "Using existing Exchange Online connection ($orgLabel)" -Level "INFO"
+        return Get-ExoMailboxTypeInSession
+    }
 
     Write-Host ""
     Write-Host "  ┌─────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
@@ -707,6 +809,9 @@ function Get-ExoMailboxType {
     Write-Host "  │  Without it, shared/room/equipment mailbox detection will use    │" -ForegroundColor Yellow
     Write-Host "  │  heuristics instead of authoritative RecipientTypeDetails.       │" -ForegroundColor Yellow
     Write-Host "  │  MFA data and risk analysis are NOT affected.                    │" -ForegroundColor Yellow
+    Write-Host "  │                                                                  │" -ForegroundColor Yellow
+    Write-Host "  │  To use an app-only connection instead, run Connect-             │" -ForegroundColor Yellow
+    Write-Host "  │  ExchangeOnline yourself before starting this script.            │" -ForegroundColor Yellow
     Write-Host "  └─────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     Write-Host ""
 
@@ -1491,12 +1596,13 @@ try {
     if (-not $context) {
         Write-Host ""
         Write-Host "  ✗ No active Microsoft Graph connection." -ForegroundColor Red
-        Write-Host "    Use menu option [1] to connect first." -ForegroundColor Yellow
+        Write-Host "    Use menu option [1], or run Connect-MgGraph yourself (for example with" -ForegroundColor Yellow
+        Write-Host "    certificate app-only auth) before starting this script." -ForegroundColor Yellow
         Write-Host ""
         return
     }
 
-    Write-Log "Using existing Microsoft Graph connection (Tenant: $($context.TenantId))" -Level "INFO"
+    Write-Log "Using existing Microsoft Graph connection (Tenant: $($context.TenantId), AuthType: $($context.AuthType))" -Level "INFO"
     Write-Verbose "Graph account   : $($context.Account)"
     Write-Verbose "Graph auth type : $($context.AuthType)"
     Write-Verbose "Graph tenant    : $($context.TenantId)"
@@ -1509,6 +1615,27 @@ try {
     # ========================================================================
     $coreRequiredScopes = @('User.Read.All', 'Directory.Read.All', 'UserAuthenticationMethod.Read.All')
     $missingCoreScopes = $coreRequiredScopes | Where-Object { -not (Test-ScopeGranted -RequiredScope $_ -GrantedScopes $context.Scopes) }
+
+    # App-only tokens do not always expose granted app roles in Get-MgContext, so a live probe
+    # is the only reliable check. A delegated-style scope check would reject a valid connection.
+    if ($context.AuthType -eq 'AppOnly') {
+        $missingCoreScopes = @()
+        try {
+            Get-MgUser -Top 1 -Property UserPrincipalName -ErrorAction Stop | Out-Null
+            Write-Log "App-only connection verified against Graph" -Level "SUCCESS"
+        }
+        catch {
+            Write-Host ""
+            Write-Host "  ✗ App-only connection cannot read users: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "    Grant the app User.Read.All, Directory.Read.All and" -ForegroundColor Yellow
+            Write-Host "    UserAuthenticationMethod.Read.All, then re-run." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Log "App-only pre-flight failed: $($_.Exception.Message)" -Level "ERROR"
+            Read-Host "  Press Enter to return to the menu"
+            return
+        }
+    }
+
     if ($missingCoreScopes) {
         Write-Host ""
         Write-Host "  ✗ Cannot run report - the following required scopes are missing:" -ForegroundColor Red
@@ -1637,13 +1764,18 @@ try {
     # ========================================================================
     # Detect account categories via Exchange Online RecipientTypeDetails
     # ========================================================================
+    if (-not $script:MailboxTypes -and (Get-ExoConnection)) {
+        Write-Log "Exchange Online session detected - retrieving mailbox types" -Level "INFO"
+        $script:MailboxTypes = Get-ExoMailboxTypeInSession
+    }
+
     $mailboxTypes = if ($script:MailboxTypes) { $script:MailboxTypes } else { @{} }
     if ($mailboxTypes.Count -gt 0) {
-        Write-Log "Using $($mailboxTypes.Count) mailbox types retrieved from Exchange Online" -Level "INFO"
+        Write-Log "Using $($mailboxTypes.Count) mailbox types from Exchange Online" -Level "INFO"
     }
     else {
-        Write-Log "Exchange Online mailbox types not loaded. Using heuristic detection." -Level "WARNING"
-        Write-Host "  ⚠ Exchange Online mailbox types not loaded - using heuristic detection" -ForegroundColor Yellow
+        Write-Log "No Exchange Online mailbox data. Using heuristic detection." -Level "WARNING"
+        Write-Host "  ⚠ Exchange Online not connected - using heuristic mailbox detection" -ForegroundColor Yellow
     }
 
     # Also try Places API for room/equipment detection (requires Place.Read.All - optional)
@@ -2310,9 +2442,9 @@ do {
             Invoke-MFAReport -OutputOptions $outputOptions
         }
         'Q' {
-            # Exchange Online runs in a child process, so there is no session to disconnect here.
-            $ctx = Get-MgContext -ErrorAction SilentlyContinue
-            if ($ctx) {
+            # Only tear down a connection this script created; a pre-existing one
+            # (typically app-only) belongs to the caller and must survive.
+            if ($script:GraphConnectedByScript -and (Get-MgContext -ErrorAction SilentlyContinue)) {
                 Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
             }
             if ($DiagnosticMode -and $script:DiagnosticTranscriptFile) {
