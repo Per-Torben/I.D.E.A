@@ -24,6 +24,8 @@
     - RoleEligibilitySchedule.Read.Directory
     - UserAuthenticationMethod.Read.All
     - PrivilegedAccess.Read.AzureADGroup
+    - Policy.Read.All
+    - CrossTenantInformation.ReadBasic.All
 
 .PARAMETER TenantId
     The Microsoft Entra ID tenant ID where the application will be registered.
@@ -415,6 +417,16 @@ $permissionsToAdd = @(
     @{
         AppId = "00000003-0000-0000-c000-000000000000" # Microsoft Graph
         PermissionName = "PrivilegedAccess.Read.AzureADGroup"
+        Type = "Application"
+    },
+    @{
+        AppId = "00000003-0000-0000-c000-000000000000" # Microsoft Graph
+        PermissionName = "Policy.Read.All"
+        Type = "Application"
+    },
+    @{
+        AppId = "00000003-0000-0000-c000-000000000000" # Microsoft Graph
+        PermissionName = "CrossTenantInformation.ReadBasic.All"
         Type = "Application"
     }
 )

@@ -58,7 +58,22 @@ User.Read.All
 Directory.Read.All
 UserAuthenticationMethod.Read.All
 AuditLog.Read.All
+Policy.Read.All
+CrossTenantInformation.ReadBasic.All
 ```
+
+`Policy.Read.All` and `CrossTenantInformation.ReadBasic.All` are used to evaluate cross-tenant inbound MFA trust. If they are not granted, the report still runs and the **MFA Trust** column shows `Unknown` for guests.
+
+### Cross-tenant inbound MFA trust
+
+A B2B guest performs MFA in their home tenant, so their authentication methods are not visible in your tenant and they are reported as having no MFA. The script reads the cross-tenant access policy (default settings plus per-partner overrides) and resolves each guest's home tenant, then reports:
+
+| MFA Trust | Meaning |
+| --- | --- |
+| `Trusted` | Inbound MFA trust is enabled for the guest's home tenant, so Conditional Access here accepts their home tenant MFA claim. Risk is downgraded from Critical to Medium. |
+| `Not trusted` | No inbound MFA trust for that home tenant, so a guest without local MFA really is unprotected. |
+| `Unknown` | The home tenant could not be resolved (Google, Microsoft account or one-time passcode guests), or the policy could not be read. |
+| `N/A` | Member account — cross-tenant trust does not apply. |
 
 Exchange Online connectivity is also required for authoritative mailbox-type detection (shared/room/equipment). The script connects automatically via menu option [2] if no existing EXO session is found.
 
