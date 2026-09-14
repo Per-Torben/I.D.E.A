@@ -53,6 +53,12 @@ The script requires read-only permissions:
 - `RoleEligibilitySchedule.Read.Directory` – Read PIM eligible assignments
 - `UserAuthenticationMethod.Read.All` – Read MFA methods
 - `PrivilegedAccess.Read.AzureADGroup` – Read PIM group eligibility
+- `Policy.Read.All` – Read cross-tenant access settings
+- `CrossTenantInformation.ReadBasic.All` – Resolve a guest's home tenant
+
+### Cross-tenant inbound MFA trust
+
+A privileged B2B guest performs MFA in their home tenant, so their authentication methods are not visible here and they are reported as having no MFA. The script reads the cross-tenant access policy and adds `MFATrust` and `HomeTenant` columns to the user status CSV. When inbound MFA trust is enabled for the guest's home tenant, the risk level is downgraded from `Critical (No MFA)` to `Medium (Home tenant MFA trusted)`. Without `Policy.Read.All` the report still runs and MFA trust shows as `Unknown`.
 
 ## Quick Start
 

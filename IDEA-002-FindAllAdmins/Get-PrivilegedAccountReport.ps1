@@ -713,6 +713,162 @@ function Get-AllGroupMembers {
     return $allMembers
 }
 
+#region Cross-tenant access (inbound MFA trust)
+
+# A B2B guest with a privileged role performs MFA in their home tenant, so their authentication
+# methods are not visible here and they appear as "No MFA". If inbound MFA trust is enabled for
+# that home tenant, Conditional Access in this tenant accepts the home tenant's MFA claim.
+
+$script:CrossTenantAccessPolicy = $null
+$script:TenantIdCache = @{}
+
+function Get-CrossTenantAccessPolicy {
+    [CmdletBinding()]
+    param([switch]$Force)
+
+    if ($script:CrossTenantAccessPolicy -and -not $Force) { return $script:CrossTenantAccessPolicy }
+
+    $policy = [PSCustomObject]@{
+        Available          = $false
+        DefaultMfaAccepted = $false
+        Partners           = @{}
+        Error              = $null
+    }
+
+    try {
+        $default = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/default' -ErrorAction Stop
+        $policy.DefaultMfaAccepted = [bool]$default.inboundTrust.isMfaAccepted
+
+        $uri = 'https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/partners'
+        while ($uri) {
+            $page = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            foreach ($partner in $page.value) {
+                if (-not $partner.tenantId) { continue }
+                # A null inboundTrust (or null isMfaAccepted) means the partner inherits the default.
+                $inherits = ($null -eq $partner.inboundTrust) -or ($null -eq $partner.inboundTrust.isMfaAccepted)
+                $policy.Partners[$partner.tenantId.ToString().ToLower()] = [PSCustomObject]@{
+                    TenantId          = $partner.tenantId.ToString()
+                    MfaAccepted       = if ($inherits) { $policy.DefaultMfaAccepted } else { [bool]$partner.inboundTrust.isMfaAccepted }
+                    InheritsDefault   = $inherits
+                    IsServiceProvider = [bool]$partner.isServiceProvider
+                }
+            }
+            $uri = $page.'@odata.nextLink'
+        }
+
+        $policy.Available = $true
+    }
+    catch {
+        $policy.Error = $_.Exception.Message
+    }
+
+    $script:CrossTenantAccessPolicy = $policy
+    return $policy
+}
+
+function Get-ExternalUserDomain {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$UserPrincipalName,
+        [AllowEmptyString()][AllowNull()][string]$Mail
+    )
+
+    # B2B guest UPNs encode the invited address as alice.smith_contoso.com#EXT#@host.onmicrosoft.com
+    if ($UserPrincipalName -match '^(?<local>.+)#EXT#@') {
+        if ($Matches['local'] -match '_(?<domain>[^_@]+\.[^_@]+)$') {
+            return $Matches['domain'].ToLower()
+        }
+    }
+
+    if ($Mail -and $Mail -match '@') { return ($Mail -split '@')[-1].Trim().ToLower() }
+    if ($UserPrincipalName -and $UserPrincipalName -match '@') { return ($UserPrincipalName -split '@')[-1].Trim().ToLower() }
+
+    return $null
+}
+
+function Resolve-TenantIdFromDomain {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Domain)
+
+    # Reject anything that is not a plain hostname so it cannot alter the request URL.
+    if ([string]::IsNullOrWhiteSpace($Domain) -or $Domain -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') {
+        return $null
+    }
+
+    $key = $Domain.ToLower()
+    if ($script:TenantIdCache.ContainsKey($key)) { return $script:TenantIdCache[$key] }
+
+    $info = $null
+    try {
+        $response = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/tenantRelationships/findTenantInformationByDomainName(domainName='$key')" -ErrorAction Stop
+        if ($response.tenantId) {
+            $info = [PSCustomObject]@{
+                TenantId    = $response.tenantId.ToString()
+                DisplayName = $response.displayName
+                Domain      = $key
+            }
+        }
+    }
+    catch {
+        # Guests from Google, Microsoft accounts or one-time passcode have no resolvable Entra tenant.
+        Write-Verbose "Tenant lookup failed for '$key': $($_.Exception.Message)"
+    }
+
+    $script:TenantIdCache[$key] = $info
+    return $info
+}
+
+function Get-CrossTenantMfaTrust {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$UserPrincipalName,
+        [AllowEmptyString()][AllowNull()][string]$Mail,
+        [AllowEmptyString()][AllowNull()][string]$UserType,
+        [PSCustomObject]$Policy
+    )
+
+    $result = [PSCustomObject]@{
+        Status       = 'N/A'
+        HomeDomain   = $null
+        HomeTenantId = $null
+        HomeTenant   = $null
+        Source       = $null
+    }
+
+    if ($UserType -ne 'Guest') { return $result }
+
+    if (-not $Policy) { $Policy = Get-CrossTenantAccessPolicy }
+    if (-not $Policy.Available) { $result.Status = 'Unknown'; return $result }
+
+    $domain = Get-ExternalUserDomain -UserPrincipalName $UserPrincipalName -Mail $Mail
+    if (-not $domain) { $result.Status = 'Unknown'; return $result }
+    $result.HomeDomain = $domain
+
+    $tenant = Resolve-TenantIdFromDomain -Domain $domain
+    if (-not $tenant) {
+        $result.Status = 'Unknown'
+        $result.HomeTenant = $domain
+        return $result
+    }
+
+    $result.HomeTenantId = $tenant.TenantId
+    $result.HomeTenant = if ($tenant.DisplayName) { $tenant.DisplayName } else { $domain }
+
+    $partner = $Policy.Partners[$tenant.TenantId.ToLower()]
+    if ($partner) {
+        $result.Source = if ($partner.InheritsDefault) { 'Default' } else { 'Partner' }
+        $result.Status = if ($partner.MfaAccepted) { 'Trusted' } else { 'Not trusted' }
+    }
+    else {
+        $result.Source = 'Default'
+        $result.Status = if ($Policy.DefaultMfaAccepted) { 'Trusted' } else { 'Not trusted' }
+    }
+
+    return $result
+}
+
+#endregion
+
 try {
     Write-Log "Starting Privileged Account Report generation" -Level "INFO"
     
@@ -723,7 +879,9 @@ try {
         "RoleManagement.Read.Directory",
         "RoleEligibilitySchedule.Read.Directory",
         "UserAuthenticationMethod.Read.All",
-        "PrivilegedAccess.Read.AzureADGroup"
+        "PrivilegedAccess.Read.AzureADGroup",
+        "Policy.Read.All",
+        "CrossTenantInformation.ReadBasic.All"
     )
     
     Write-Log "Connecting to Microsoft Graph..." -Level "INFO"
@@ -2088,6 +2246,31 @@ try {
         $privilegedUsers[$userId].AUProtection = Test-UserInRestrictedAU -UserId $userId
     }
     
+    # Check cross-tenant inbound MFA trust for privileged B2B guests
+    Write-Log "Retrieving cross-tenant access settings..." -Level "INFO"
+    $crossTenantPolicy = Get-CrossTenantAccessPolicy -Force
+    if ($crossTenantPolicy.Available) {
+        $trustedPartners = @($crossTenantPolicy.Partners.Values | Where-Object { $_.MfaAccepted }).Count
+        Write-Log "Cross-tenant access: default inbound MFA trust = $($crossTenantPolicy.DefaultMfaAccepted); $($crossTenantPolicy.Partners.Count) partner(s), $trustedPartners with MFA trust" -Level "INFO"
+    }
+    else {
+        Write-Log "Could not read cross-tenant access settings (needs Policy.Read.All): $($crossTenantPolicy.Error)" -Level "WARNING"
+    }
+    
+    foreach ($userId in $privilegedUsers.Keys) {
+        $upn = $privilegedUsers[$userId].UserPrincipalName
+        # UserType is not captured on every collection path; the #EXT# marker identifies B2B guests.
+        $userType = if ($upn -like '*#EXT#@*') { 'Guest' } else { 'Member' }
+        $privilegedUsers[$userId].MFATrust = Get-CrossTenantMfaTrust -UserPrincipalName $upn -UserType $userType -Policy $crossTenantPolicy
+    }
+    
+    $guestsCoveredByTrust = @($privilegedUsers.Values | Where-Object {
+        $_.MFAStatus.MFACapable -eq $false -and $_.MFATrust.Status -eq 'Trusted'
+    }).Count
+    if ($guestsCoveredByTrust -gt 0) {
+        Write-Log "$guestsCoveredByTrust privileged guest(s) without local MFA are covered by inbound MFA trust" -Level "INFO"
+    }
+    
     # Calculate MFA statistics (handle null when permission missing)
     # Use @() to force array conversion for accurate .Count when single item returned
     $mfaEnabledCount = @($privilegedUsers.Values | Where-Object { $_.MFAStatus.MFACapable -eq $true }).Count
@@ -2435,6 +2618,7 @@ try {
             AccountEnabled = $user.AccountEnabled
             MFAStatus = $user.MFAStatus
             AUProtection = $user.AUProtection
+            MFATrust = $user.MFATrust
             ActiveRoles = $user.ActiveRoles
             EligibleRoles = $user.EligibleRoles
             GroupBasedRoles = $user.GroupBasedRoles
@@ -2516,6 +2700,12 @@ try {
                 "Low"
             }
             
+            # A guest's MFA happens in their home tenant, so "no MFA" here is not the whole picture
+            # when inbound MFA trust makes this tenant accept that home tenant's MFA claim.
+            if ($riskLevel -eq "Critical" -and $account.MFATrust.Status -eq "Trusted") {
+                $riskLevel = "Medium"
+            }
+            
             # Display comprehensive security status line
             Write-Host "   Risk: " -NoNewline -ForegroundColor DarkGray
             switch ($riskLevel) {
@@ -2542,6 +2732,16 @@ try {
                 Write-Host "✅ Yes" -NoNewline -ForegroundColor Green
             } else {
                 Write-Host "❌ No" -NoNewline -ForegroundColor Red
+            }
+            
+            # Inbound MFA trust for guests whose MFA happens in their home tenant
+            if ($account.MFATrust -and $account.MFATrust.Status -ne 'N/A') {
+                Write-Host " | Home tenant MFA: " -NoNewline -ForegroundColor DarkGray
+                switch ($account.MFATrust.Status) {
+                    "Trusted"     { Write-Host "✅ Trusted ($($account.MFATrust.HomeTenant))" -NoNewline -ForegroundColor Green }
+                    "Not trusted" { Write-Host "❌ Not trusted ($($account.MFATrust.HomeTenant))" -NoNewline -ForegroundColor Red }
+                    default       { Write-Host "❓ Unknown" -NoNewline -ForegroundColor DarkGray }
+                }
             }
             
             # SMS/Phone MFA status (separate field)
@@ -2904,6 +3104,14 @@ try {
                 "Low (Secure)"
             }
             
+            # A guest's MFA happens in their home tenant, so "no MFA" here is not the whole picture
+            # when inbound MFA trust makes this tenant accept that home tenant's MFA claim.
+            if ($riskLevel -eq "Critical (No MFA)" -and $user.MFATrust.Status -eq "Trusted") {
+                $riskLevel = "Medium (Home tenant MFA trusted)"
+            }
+            $mfaTrustStatus = if ($user.MFATrust) { $user.MFATrust.Status } else { "N/A" }
+            $homeTenant = if ($user.MFATrust) { $user.MFATrust.HomeTenant } else { "" }
+            
             # Create rows for active assignments
             foreach ($role in $user.ActiveRoles) {
                 $exportData += [PSCustomObject]@{
@@ -2923,6 +3131,8 @@ try {
                     HasPhoneMFA = if ($null -eq $mfaStatus.HasPhone) { "Unknown" } elseif ($mfaStatus.HasPhone) { "Yes" } else { "No" }
                     AUProtected = if ($user.AUProtection.IsProtected) { "Yes" } else { "No" }
                     AUName = $user.AUProtection.AUName
+                    MFATrust = $mfaTrustStatus
+                    HomeTenant = $homeTenant
                     RiskLevel = $riskLevel
                 }
             }
@@ -2946,6 +3156,8 @@ try {
                     HasPhoneMFA = if ($null -eq $mfaStatus.HasPhone) { "Unknown" } elseif ($mfaStatus.HasPhone) { "Yes" } else { "No" }
                     AUProtected = if ($user.AUProtection.IsProtected) { "Yes" } else { "No" }
                     AUName = $user.AUProtection.AUName
+                    MFATrust = $mfaTrustStatus
+                    HomeTenant = $homeTenant
                     RiskLevel = $riskLevel
                 }
             }
@@ -3002,6 +3214,8 @@ try {
                         HasPhoneMFA = if ($null -eq $mfaStatus.HasPhone) { "Unknown" } elseif ($mfaStatus.HasPhone) { "Yes" } else { "No" }
                         AUProtected = if ($user.AUProtection.IsProtected) { "Yes" } else { "No" }
                         AUName = $user.AUProtection.AUName
+                        MFATrust = $mfaTrustStatus
+                        HomeTenant = $homeTenant
                         RiskLevel = $riskLevel
                     }
                 }
@@ -3027,6 +3241,8 @@ try {
                     HasPhoneMFA = if ($null -eq $mfaStatus.HasPhone) { "Unknown" } elseif ($mfaStatus.HasPhone) { "Yes" } else { "No" }
                     AUProtected = if ($user.AUProtection.IsProtected) { "Yes" } else { "No" }
                     AUName = $user.AUProtection.AUName
+                    MFATrust = $mfaTrustStatus
+                    HomeTenant = $homeTenant
                     RiskLevel = $riskLevel
                 }
             }

@@ -106,9 +106,15 @@
     - UserAuthenticationMethod.Read.All
     - AuditLog.Read.All (for sign-in activity data)
     
-    Also requires Exchange Online connectivity (Connect-ExchangeOnline) for authoritative
-    mailbox-type detection (shared/room/equipment). The script will connect automatically
-    if no existing EXO session is found.
+    Optionally uses Exchange Online for authoritative mailbox-type detection
+    (shared/room/equipment) via menu option [2].
+
+    Note on Graph vs Exchange
+    -------------------------
+    Microsoft.Graph and ExchangeOnlineManagement ship different MSAL versions and cannot both
+    sign in interactively in one process - whichever authenticates second fails. All Exchange
+    work therefore runs in a separate PowerShell process (see Get-ExoMailboxType), and
+    ExchangeOnlineManagement is never imported into this process.
 
     TROUBLESHOOTING - PERMISSION / CONSENT ERRORS (403 Authorization_RequestDenied):
     ---------------------------------------------------------------------------------
@@ -144,7 +150,7 @@
                        - Edge now opens report in normal window instead of guest mode
                        - Added -DiagnosticMode switch (transcript + verbose logging)
                        - Added pre-flight scope check with actionable consent fix instructions
-                       - WAM token cache troubleshooting documented and handled in Connect-Graph
+                       - WAM token cache troubleshooting documented and handled in Connect-ReportGraph
                        - Fixed Authorization_RequestDenied misclassified as AuditLog error
                        - Redesigned HTML dashboard: MFA distribution bar, admin/member/guest
                          stat cards with X/N fractions, risk and phone pie charts
@@ -191,6 +197,10 @@ foreach ($module in $requiredModules) {
         Write-Host "✓ Installed $module" -ForegroundColor Green
     }
 }
+
+# Populated by menu option [2] from a child process; ExchangeOnlineManagement is never
+# imported here because its MSAL version conflicts with the Graph SDK's.
+$script:MailboxTypes = $null
 
 # ============================================================================
 # Logging
@@ -243,6 +253,33 @@ function Write-Log {
         "ERROR"   { Write-Host $Message -ForegroundColor Red }
         default   { Write-Host $Message -ForegroundColor White }
     }
+}
+
+# ============================================================================
+# Scope Helpers
+# ============================================================================
+# Maps a required (read) scope to broader scopes that also satisfy it, since
+# Graph does not require both to be requested/granted together.
+$ScopeEquivalents = @{
+    'User.Read.All'                    = @('User.ReadWrite.All')
+    'Directory.Read.All'               = @('Directory.ReadWrite.All')
+    'UserAuthenticationMethod.Read.All' = @('UserAuthenticationMethod.ReadWrite.All')
+    'AuditLog.Read.All'                 = @('AuditLog.ReadWrite.All')
+}
+
+function Test-ScopeGranted {
+    param(
+        [string]$RequiredScope,
+        [string[]]$GrantedScopes
+    )
+    if ($GrantedScopes -contains $RequiredScope) { return $true }
+    $equivalents = $ScopeEquivalents[$RequiredScope]
+    if ($equivalents) {
+        foreach ($equivalent in $equivalents) {
+            if ($GrantedScopes -contains $equivalent) { return $true }
+        }
+    }
+    return $false
 }
 
 # ============================================================================
@@ -341,8 +378,8 @@ function Show-Banner {
 function Show-ConnectionStatus {
     $graphStatus = "Not connected"
     $graphColor = "Red"
-    $exoStatus = "Not connected"
-    $exoColor = "Red"
+    $exoStatus = "Not loaded (heuristics will be used)"
+    $exoColor = "Yellow"
 
     $ctx = Get-MgContext -ErrorAction SilentlyContinue
     if ($ctx) {
@@ -357,15 +394,10 @@ function Show-ConnectionStatus {
         $graphColor = "Green"
     }
 
-    $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
-    if ($exoSession) {
-        # Show the default accepted domain (e.g. contoso.com) when available
-        try {
-            $defaultDomain = (Get-AcceptedDomain -ErrorAction SilentlyContinue |
-                Where-Object { $_.Default -eq $true } |
-                Select-Object -First 1).DomainName
-        } catch { $defaultDomain = $null }
-        $exoStatus = if ($defaultDomain) { "Connected ($defaultDomain)" } else { "Connected" }
+    # Deliberately not calling Get-ConnectionInformation: it would auto-import
+    # ExchangeOnlineManagement into this process and break Graph's MSAL.
+    if ($script:MailboxTypes) {
+        $exoStatus = "Mailbox types loaded ($($script:MailboxTypes.Count) mailboxes)"
         $exoColor = "Green"
     }
 
@@ -401,7 +433,7 @@ function Show-MainMenu {
     Show-ConnectionStatus
     Show-StaleFilesWarning
     Write-Host "  [1] Connect to Microsoft Graph" -ForegroundColor Green
-    Write-Host "  [2] Connect to Exchange Online (optional)" -ForegroundColor Green
+    Write-Host "  [2] Load Exchange Online mailbox types (optional)" -ForegroundColor Green
     Write-Host "  [3] Generate MFA Report" -ForegroundColor Green
     Write-Host "  [Q] Quit" -ForegroundColor Gray
     Write-Host ""
@@ -431,12 +463,172 @@ function Show-OutputMenu {
     }
 }
 
-function Connect-Graph {
+#region Cross-tenant access (inbound MFA trust)
+
+# A B2B guest's MFA is performed in their home tenant, so their authentication methods are
+# not visible here and they appear as "no MFA". If inbound MFA trust is enabled for that
+# home tenant, Conditional Access in this tenant accepts the home tenant's MFA claim.
+
+$script:CrossTenantAccessPolicy = $null
+$script:TenantIdCache = @{}
+
+function Get-CrossTenantAccessPolicy {
+    [CmdletBinding()]
+    param([switch]$Force)
+
+    if ($script:CrossTenantAccessPolicy -and -not $Force) { return $script:CrossTenantAccessPolicy }
+
+    $policy = [PSCustomObject]@{
+        Available          = $false
+        DefaultMfaAccepted = $false
+        Partners           = @{}
+        Error              = $null
+    }
+
+    try {
+        $default = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/default' -ErrorAction Stop
+        $policy.DefaultMfaAccepted = [bool]$default.inboundTrust.isMfaAccepted
+
+        $uri = 'https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/partners'
+        while ($uri) {
+            $page = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            foreach ($partner in $page.value) {
+                if (-not $partner.tenantId) { continue }
+                # A null inboundTrust (or null isMfaAccepted) means the partner inherits the default.
+                $inherits = ($null -eq $partner.inboundTrust) -or ($null -eq $partner.inboundTrust.isMfaAccepted)
+                $policy.Partners[$partner.tenantId.ToString().ToLower()] = [PSCustomObject]@{
+                    TenantId          = $partner.tenantId.ToString()
+                    MfaAccepted       = if ($inherits) { $policy.DefaultMfaAccepted } else { [bool]$partner.inboundTrust.isMfaAccepted }
+                    InheritsDefault   = $inherits
+                    IsServiceProvider = [bool]$partner.isServiceProvider
+                }
+            }
+            $uri = $page.'@odata.nextLink'
+        }
+
+        $policy.Available = $true
+    }
+    catch {
+        $policy.Error = $_.Exception.Message
+    }
+
+    $script:CrossTenantAccessPolicy = $policy
+    return $policy
+}
+
+function Get-ExternalUserDomain {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$UserPrincipalName,
+        [AllowEmptyString()][AllowNull()][string]$Mail
+    )
+
+    # B2B guest UPNs encode the invited address as alice.smith_contoso.com#EXT#@host.onmicrosoft.com
+    if ($UserPrincipalName -match '^(?<local>.+)#EXT#@') {
+        if ($Matches['local'] -match '_(?<domain>[^_@]+\.[^_@]+)$') {
+            return $Matches['domain'].ToLower()
+        }
+    }
+
+    if ($Mail -and $Mail -match '@') { return ($Mail -split '@')[-1].Trim().ToLower() }
+    if ($UserPrincipalName -and $UserPrincipalName -match '@') { return ($UserPrincipalName -split '@')[-1].Trim().ToLower() }
+
+    return $null
+}
+
+function Resolve-TenantIdFromDomain {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Domain)
+
+    # Reject anything that is not a plain hostname so it cannot alter the request URL.
+    if ([string]::IsNullOrWhiteSpace($Domain) -or $Domain -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') {
+        return $null
+    }
+
+    $key = $Domain.ToLower()
+    if ($script:TenantIdCache.ContainsKey($key)) { return $script:TenantIdCache[$key] }
+
+    $info = $null
+    try {
+        $response = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/tenantRelationships/findTenantInformationByDomainName(domainName='$key')" -ErrorAction Stop
+        if ($response.tenantId) {
+            $info = [PSCustomObject]@{
+                TenantId    = $response.tenantId.ToString()
+                DisplayName = $response.displayName
+                Domain      = $key
+            }
+        }
+    }
+    catch {
+        # Guests from Google, Microsoft accounts or one-time passcode have no resolvable Entra tenant.
+        Write-Verbose "Tenant lookup failed for '$key': $($_.Exception.Message)"
+    }
+
+    $script:TenantIdCache[$key] = $info
+    return $info
+}
+
+function Get-CrossTenantMfaTrust {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$UserPrincipalName,
+        [AllowEmptyString()][AllowNull()][string]$Mail,
+        [AllowEmptyString()][AllowNull()][string]$UserType,
+        [PSCustomObject]$Policy
+    )
+
+    $result = [PSCustomObject]@{
+        Status       = 'N/A'
+        HomeDomain   = $null
+        HomeTenantId = $null
+        HomeTenant   = $null
+        Source       = $null
+    }
+
+    if ($UserType -ne 'Guest') { return $result }
+
+    if (-not $Policy) { $Policy = Get-CrossTenantAccessPolicy }
+    if (-not $Policy.Available) { $result.Status = 'Unknown'; return $result }
+
+    $domain = Get-ExternalUserDomain -UserPrincipalName $UserPrincipalName -Mail $Mail
+    if (-not $domain) { $result.Status = 'Unknown'; return $result }
+    $result.HomeDomain = $domain
+
+    $tenant = Resolve-TenantIdFromDomain -Domain $domain
+    if (-not $tenant) {
+        $result.Status = 'Unknown'
+        $result.HomeTenant = $domain
+        return $result
+    }
+
+    $result.HomeTenantId = $tenant.TenantId
+    $result.HomeTenant = if ($tenant.DisplayName) { $tenant.DisplayName } else { $domain }
+
+    $partner = $Policy.Partners[$tenant.TenantId.ToLower()]
+    if ($partner) {
+        $result.Source = if ($partner.InheritsDefault) { 'Default' } else { 'Partner' }
+        $result.Status = if ($partner.MfaAccepted) { 'Trusted' } else { 'Not trusted' }
+    }
+    else {
+        $result.Source = 'Default'
+        $result.Status = if ($Policy.DefaultMfaAccepted) { 'Trusted' } else { 'Not trusted' }
+    }
+
+    return $result
+}
+
+#endregion
+
+# Not named Connect-Graph: that is an alias for Connect-MgGraph in Microsoft.Graph.Authentication,
+# and aliases outrank functions in command resolution, so the alias would silently win.
+function Connect-ReportGraph {
     $requiredScopes = @(
         "User.Read.All",
         "Directory.Read.All",
         "UserAuthenticationMethod.Read.All",
-        "AuditLog.Read.All"
+        "AuditLog.Read.All",
+        "Policy.Read.All",
+        "CrossTenantInformation.ReadBasic.All"
     )
 
     Write-Host ""
@@ -464,7 +656,7 @@ function Connect-Graph {
             Write-Verbose "Graph auth type : $($ctx.AuthType)"
             Write-Verbose "Graph tenant    : $($ctx.TenantId)"
             Write-Verbose "Granted scopes  : $($ctx.Scopes -join ', ')"
-            $missing = $requiredScopes | Where-Object { $ctx.Scopes -notcontains $_ }
+            $missing = $requiredScopes | Where-Object { -not (Test-ScopeGranted -RequiredScope $_ -GrantedScopes $ctx.Scopes) }
             if ($missing) {
                 Write-Host ""
                 Write-Host "  ⚠ WARNING: The following required scopes were NOT granted:" -ForegroundColor Yellow
@@ -496,7 +688,19 @@ function Connect-Graph {
     }
 }
 
-function Connect-Exo {
+function Get-ExoMailboxType {
+    <#
+    .SYNOPSIS
+        Retrieves mailbox RecipientTypeDetails from Exchange Online in a separate process.
+    .DESCRIPTION
+        Microsoft.Graph and ExchangeOnlineManagement ship different Microsoft.Identity.Client
+        versions and cannot both sign in interactively in one process: whichever authenticates
+        second fails inside MSAL. ExchangeOnlineManagement is therefore never loaded into this
+        process at all - a child process collects the mailbox types and hands them back as CSV.
+    .OUTPUTS
+        [hashtable] lowercase UPN -> RecipientTypeDetails, or $null when unavailable.
+    #>
+
     Write-Host ""
     Write-Host "  ┌─────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
     Write-Host "  │  Exchange Online is OPTIONAL.                                    │" -ForegroundColor Yellow
@@ -505,22 +709,83 @@ function Connect-Exo {
     Write-Host "  │  MFA data and risk analysis are NOT affected.                    │" -ForegroundColor Yellow
     Write-Host "  └─────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     Write-Host ""
-    
-    $confirm = Read-Host "  Connect to Exchange Online? (Y/N)"
+
+    $confirm = Read-Host "  Retrieve mailbox types from Exchange Online? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
-        Write-Host "  Skipped Exchange Online connection." -ForegroundColor DarkGray
-        return
+        Write-Host "  Skipped Exchange Online." -ForegroundColor DarkGray
+        return $null
     }
 
-    Write-Host "  Connecting to Exchange Online..." -ForegroundColor Yellow
+    $childScript = @'
+param([Parameter(Mandatory)] [string]$OutputPath)
+
+$ErrorActionPreference = 'Stop'
+
+try {
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
+    Write-Host 'Connecting to Exchange Online (browser sign-in required)...'
+    Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+    Write-Host 'Connected to Exchange Online'
+
+    Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop |
+        Select-Object UserPrincipalName, RecipientTypeDetails |
+        Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+
+    Write-Host 'Mailbox types exported'
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+    exit 0
+}
+catch {
+    Write-Host "ERROR: $($_.Exception.Message)"
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+    exit 1
+}
+'@
+
+    $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "IDEA004-Exo-$([guid]::NewGuid().ToString('N')).ps1"
+    $tempCsv = Join-Path ([System.IO.Path]::GetTempPath()) "IDEA004-Exo-$([guid]::NewGuid().ToString('N')).csv"
+
     try {
-        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-        Write-Host "  ✓ Connected to Exchange Online" -ForegroundColor Green
-        Write-Log "Connected to Exchange Online" -Level "SUCCESS"
+        Set-Content -Path $tempScript -Value $childScript -Encoding UTF8 -ErrorAction Stop
+
+        # Reuse the running interpreter rather than trusting 'pwsh' to be on PATH.
+        $pwshPath = (Get-Process -Id $PID).Path
+
+        Write-Host "  Launching separate process for Exchange Online (avoids MSAL conflict with Graph)..." -ForegroundColor Yellow
+        Write-Log "Launching child process for Exchange Online mailbox types" -Level "INFO"
+
+        & $pwshPath -NoProfile -File $tempScript -OutputPath $tempCsv 2>&1 |
+            ForEach-Object { Write-Log "  $_" -Level "INFO" }
+
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -ne 0 -or -not (Test-Path $tempCsv)) {
+            Write-Host "  ✗ Exchange Online retrieval failed (exit code $exitCode) - heuristics will be used" -ForegroundColor Red
+            Write-Log "Exchange Online child process failed with exit code $exitCode" -Level "WARNING"
+            return $null
+        }
+
+        $map = @{}
+        foreach ($row in (Import-Csv -Path $tempCsv)) {
+            if ($row.UserPrincipalName) { $map[$row.UserPrincipalName.ToLower()] = $row.RecipientTypeDetails }
+        }
+
+        $typeSummary = (Import-Csv -Path $tempCsv | Group-Object RecipientTypeDetails |
+            ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', '
+
+        Write-Host "  ✓ Retrieved $($map.Count) mailbox types from Exchange Online" -ForegroundColor Green
+        Write-Log "Mailbox types retrieved: $typeSummary" -Level "SUCCESS"
+        return $map
     }
     catch {
-        Write-Host "  ✗ Connection failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Log "Exchange Online connection failed: $($_.Exception.Message)" -Level "ERROR"
+        Write-Host "  ✗ Exchange Online retrieval failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "Exchange Online retrieval failed: $($_.Exception.Message)" -Level "ERROR"
+        return $null
+    }
+    finally {
+        if (Test-Path $tempScript) { Remove-Item $tempScript -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $tempCsv) { Remove-Item $tempCsv -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -644,14 +909,19 @@ function New-HtmlReport {
             isAdmin         = if ($_.isAdmin) { 'Yes' } else { 'No' }
             licensed        = if ($_.licensed) { 'Yes' } else { 'No' }
             lastSignIn      = $lastSignInStr
+            mfaTrust        = if ($_.mfaTrust) { $_.mfaTrust } else { 'N/A' }
+            homeTenant      = if ($_.homeTenant) { $_.homeTenant } else { '' }
             riskLevel       = $_.RiskLevel
             riskNotes       = $_.RiskNotes
         }
     }
 
     $jsonData = $jsonRows | ConvertTo-Json -Depth 3 -Compress
-    # Escape for embedding in JS (prevent XSS via </script> in user data)
-    $jsonData = $jsonData -replace '\\', '\\\\' -replace '</', '<\/' -replace "'", "\'"
+    if (-not $jsonData) { $jsonData = '[]' }
+    # ConvertTo-Json emits a bare object for a single record; DATA.length would be undefined
+    if ($jsonData -notmatch '^\s*\[') { $jsonData = "[$jsonData]" }
+    # JSON is valid JS, so it is emitted as-is; only "</" is broken up so data cannot end the <script> block
+    $jsonData = $jsonData -replace '</', '<\/'
 
     $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $smsVoiceOnlyCount = ($export | Where-Object { $_.RiskLevel -eq 'High' -and $_.RiskNotes -like 'SMS/voice-only MFA*' }).Count
@@ -742,6 +1012,7 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge-disabled { background: #ffebee; color: #c62828; }
 .badge-guest { background: #e3f2fd; color: #1565c0; }
 .badge-member { background: #f3e5f5; color: #6a1b9a; }
+.muted { color: #757575; font-size: 0.85em; }
 .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #999; }
 .pii-notice { background: #e8f4fd; border: 1px solid #4f83cc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85em; color: #17324d; display: flex; align-items: flex-start; gap: 12px; }
 .pii-notice .pii-icon { font-size: 1.4em; flex-shrink: 0; line-height: 1.2; color: #1565c0; }
@@ -878,6 +1149,7 @@ $smsVoiceAdvisoryHtml
 <th data-col="isAdmin" onclick="sortTable('isAdmin')">Admin<span class="sort-icon"></span></th>
 <th data-col="licensed" onclick="sortTable('licensed')">Licensed<span class="sort-icon"></span></th>
 <th data-col="lastSignIn" onclick="sortTable('lastSignIn')">Last Sign-In<span class="sort-icon"></span></th>
+<th data-col="mfaTrust" onclick="sortTable('mfaTrust')" title="Cross-tenant inbound MFA trust for a guest's home tenant">MFA Trust<span class="sort-icon"></span></th>
 <th data-col="riskLevel" onclick="sortTable('riskLevel')">Risk<span class="sort-icon"></span></th>
 <th data-col="riskNotes" onclick="sortTable('riskNotes')">Risk Notes<span class="sort-icon"></span></th>
 </tr>
@@ -892,7 +1164,7 @@ Generated by I.D.E.A. 004 - Entra ID MFA Report | Per-Torben Sørensen
 </div>
 
 <script>
-const DATA = JSON.parse('$jsonData');
+const DATA = $jsonData;
 let sortCol = 'riskLevel';
 let sortDir = 'asc';
 let activeMethodFilters = [];
@@ -983,6 +1255,7 @@ function renderTable() {
             '<td>' + esc(r.isAdmin) + '</td>' +
             '<td>' + esc(r.licensed) + '</td>' +
             '<td>' + esc(r.lastSignIn) + '</td>' +
+            '<td>' + esc(r.mfaTrust === 'N/A' ? '' : r.mfaTrust) + (r.homeTenant ? ' <span class="muted">(' + esc(r.homeTenant) + ')</span>' : '') + '</td>' +
             '<td><span class="badge ' + bc + '">' + esc(r.riskLevel) + '</span></td>' +
             '<td>' + esc(r.riskNotes) + '</td></tr>';
     }).join('');
@@ -1235,7 +1508,7 @@ try {
     # User.Read/email) even when broader scopes were requested.
     # ========================================================================
     $coreRequiredScopes = @('User.Read.All', 'Directory.Read.All', 'UserAuthenticationMethod.Read.All')
-    $missingCoreScopes = $coreRequiredScopes | Where-Object { $context.Scopes -notcontains $_ }
+    $missingCoreScopes = $coreRequiredScopes | Where-Object { -not (Test-ScopeGranted -RequiredScope $_ -GrantedScopes $context.Scopes) }
     if ($missingCoreScopes) {
         Write-Host ""
         Write-Host "  ✗ Cannot run report - the following required scopes are missing:" -ForegroundColor Red
@@ -1348,31 +1621,29 @@ try {
     }
 
     # ========================================================================
-    # Detect account categories via Exchange Online RecipientTypeDetails
+    # Cross-tenant access settings (inbound MFA trust for B2B guests)
     # ========================================================================
-    $mailboxTypes = @{}  # UPN -> RecipientTypeDetails
-    $exoConnected = $false
-    $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
-    if ($exoSession) {
-        Write-Log "Retrieving mailbox types from Exchange Online..." -Level "INFO"
-        try {
-            $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop
-            foreach ($mbx in $mailboxes) {
-                if ($mbx.UserPrincipalName) {
-                    $mailboxTypes[$mbx.UserPrincipalName.ToLower()] = $mbx.RecipientTypeDetails
-                }
-            }
-
-        $typeSummary = $mailboxes | Group-Object RecipientTypeDetails | ForEach-Object { "$($_.Name): $($_.Count)" }
-        Write-Log "Mailbox types retrieved: $($typeSummary -join ', ')" -Level "INFO"
-        }
-        catch {
-            Write-Log "Could not retrieve mailbox types from Exchange Online: $($_.Exception.Message). Using heuristic detection." -Level "WARNING"
-        }
+    Write-Log "Retrieving cross-tenant access settings..." -Level "INFO"
+    $crossTenantPolicy = Get-CrossTenantAccessPolicy -Force
+    if ($crossTenantPolicy.Available) {
+        $trustedPartners = ($crossTenantPolicy.Partners.Values | Where-Object { $_.MfaAccepted }).Count
+        Write-Log "Cross-tenant access: default inbound MFA trust = $($crossTenantPolicy.DefaultMfaAccepted); $($crossTenantPolicy.Partners.Count) partner(s), $trustedPartners with MFA trust" -Level "INFO"
     }
     else {
-        Write-Log "Exchange Online not connected. Using heuristic detection for mailbox types." -Level "WARNING"
-        Write-Host "  ⚠ Exchange Online not connected - using heuristic mailbox detection" -ForegroundColor Yellow
+        Write-Log "Could not read cross-tenant access settings (needs Policy.Read.All): $($crossTenantPolicy.Error)" -Level "WARNING"
+        Write-Host "  ⚠ Cross-tenant access settings unavailable - guest MFA trust will show as Unknown" -ForegroundColor Yellow
+    }
+
+    # ========================================================================
+    # Detect account categories via Exchange Online RecipientTypeDetails
+    # ========================================================================
+    $mailboxTypes = if ($script:MailboxTypes) { $script:MailboxTypes } else { @{} }
+    if ($mailboxTypes.Count -gt 0) {
+        Write-Log "Using $($mailboxTypes.Count) mailbox types retrieved from Exchange Online" -Level "INFO"
+    }
+    else {
+        Write-Log "Exchange Online mailbox types not loaded. Using heuristic detection." -Level "WARNING"
+        Write-Host "  ⚠ Exchange Online mailbox types not loaded - using heuristic detection" -ForegroundColor Yellow
     }
 
     # Also try Places API for room/equipment detection (requires Place.Read.All - optional)
@@ -1488,6 +1759,9 @@ try {
         # Admin check
         $isAdmin = $adminUserIds.ContainsKey($user.Id)
 
+        # B2B guests authenticate in their home tenant, so check whether that tenant's MFA claim is trusted here
+        $mfaTrust = Get-CrossTenantMfaTrust -UserPrincipalName $user.UserPrincipalName -Mail $user.Mail -UserType $user.UserType -Policy $crossTenantPolicy
+
         try {
             $UserAuth = Get-MgBetaUserAuthenticationMethod -UserId $user.UserPrincipalName -ErrorAction Stop
             $output = [PSCustomObject]@{
@@ -1514,6 +1788,8 @@ try {
                 isAdmin           = $isAdmin
                 licensed          = $isLicensed
                 lastSignIn        = $lastSignIn
+                mfaTrust          = $mfaTrust.Status
+                homeTenant        = $mfaTrust.HomeTenant
                 RiskLevel         = "N/A"
                 RiskNotes         = ""
             }
@@ -1606,6 +1882,16 @@ try {
                 $output.RiskNotes = "All methods phishing-resistant"
             }
 
+            # A guest with no locally registered methods is not necessarily unprotected: when inbound
+            # MFA trust is on, this tenant accepts the MFA the guest performed in their home tenant.
+            if ($output.RiskLevel -eq "Critical" -and $mfaTrust.Status -eq "Trusted") {
+                $output.RiskLevel = "Medium"
+                $output.RiskNotes = "No MFA registered locally; home tenant MFA accepted via cross-tenant inbound trust ($($mfaTrust.HomeTenant))"
+            }
+            elseif ($output.RiskLevel -eq "Critical" -and $mfaTrust.Status -eq "Not trusted") {
+                $output.RiskNotes = "No MFA registered; no inbound MFA trust for home tenant ($($mfaTrust.HomeTenant))"
+            }
+
             $export.Add($output) | Out-Null
         }
         catch {
@@ -1636,6 +1922,8 @@ try {
                     isAdmin           = $isAdmin
                     licensed          = $isLicensed
                     lastSignIn        = $lastSignIn
+                    mfaTrust          = $mfaTrust.Status
+                    homeTenant        = $mfaTrust.HomeTenant
                     RiskLevel         = "N/A"
                     RiskNotes         = "Restricted Management AU (access denied)"
                 }
@@ -1666,6 +1954,8 @@ try {
                     isAdmin           = $isAdmin
                     licensed          = $isLicensed
                     lastSignIn        = $lastSignIn
+                    mfaTrust          = $mfaTrust.Status
+                    homeTenant        = $mfaTrust.HomeTenant
                     RiskLevel         = "N/A"
                     RiskNotes         = "CA policy blocked assessment"
                 }
@@ -1787,6 +2077,17 @@ try {
     Write-Host "  MFA Enabled: $gMfaOn" -ForegroundColor Green
     Write-Host "  MFA Disabled (account enabled): $gMfaOffEnabled" -ForegroundColor Red
     Write-Host "  MFA Disabled (account disabled): $gMfaOffDisabled" -ForegroundColor Gray
+
+    # Cross-tenant inbound MFA trust coverage for guests with no locally registered MFA
+    $gNoMfaTrusted = ($guestAccounts | Where-Object { $_.MFAstatus -eq 'disabled' -and $_.enabled -and $_.mfaTrust -eq 'Trusted' }).Count
+    $gNoMfaUntrusted = ($guestAccounts | Where-Object { $_.MFAstatus -eq 'disabled' -and $_.enabled -and $_.mfaTrust -eq 'Not trusted' }).Count
+    $gNoMfaUnknown = ($guestAccounts | Where-Object { $_.MFAstatus -eq 'disabled' -and $_.enabled -and $_.mfaTrust -eq 'Unknown' }).Count
+    if ($gMfaOffEnabled -gt 0) {
+        Write-Host "  Of those without local MFA (account enabled):" -ForegroundColor Yellow
+        Write-Host "    Covered by inbound MFA trust:     $gNoMfaTrusted" -ForegroundColor Green
+        Write-Host "    No inbound MFA trust:             $gNoMfaUntrusted" -ForegroundColor Red
+        Write-Host "    Home tenant could not be resolved: $gNoMfaUnknown" -ForegroundColor Gray
+    }
 
     # --- ADMIN ACCOUNTS ---
     Write-Host "`nADMIN ACCOUNTS:" -ForegroundColor Yellow
@@ -2002,18 +2303,14 @@ do {
     $choice = $choice.Trim().ToUpper()
 
     switch ($choice) {
-        '1' { Connect-Graph }
-        '2' { Connect-Exo }
+        '1' { Connect-ReportGraph }
+        '2' { $script:MailboxTypes = Get-ExoMailboxType }
         '3' {
             $outputOptions = Show-OutputMenu
             Invoke-MFAReport -OutputOptions $outputOptions
         }
         'Q' {
-            # Disconnect services
-            $exoSession = Get-ConnectionInformation -ErrorAction SilentlyContinue
-            if ($exoSession) {
-                Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-            }
+            # Exchange Online runs in a child process, so there is no session to disconnect here.
             $ctx = Get-MgContext -ErrorAction SilentlyContinue
             if ($ctx) {
                 Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
