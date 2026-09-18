@@ -25,6 +25,12 @@
     reference for everything created in the session. It contains the TenantId, certificate
     thumbprint, and the ClientId + connection script name for each registered service.
 
+    The main menu also offers a second mode: adding Microsoft Graph permissions to an app
+    registration that already exists. It uses the same permission menu — including the
+    I.D.E.A. 002, I.D.E.A. 004 and Entra Security Assessment bundles — preserves the
+    permissions already on the app, grants admin consent for the missing ones, and verifies
+    the result against the tenant.
+
     Use cases for the config JSON:
       • Quick reference — look up any ClientId or thumbprint without opening the Entra portal
       • Script reuse   — other scripts can load it with ConvertFrom-Json to retrieve connection
@@ -119,21 +125,80 @@ $script:ServiceMap = [ordered]@{
     '4' = 'SharePointOnline'
 }
 
+# Permission bundles for Microsoft Graph. Each bundle maps to the scopes an I.D.E.A.
+# script actually requests, so the app can be consented once for that use case.
+$script:Idea002Permissions = @(
+    'User.Read.All'
+    'Directory.Read.All'
+    'RoleManagement.Read.Directory'
+    'RoleEligibilitySchedule.Read.Directory'
+    'UserAuthenticationMethod.Read.All'
+    'PrivilegedAccess.Read.AzureADGroup'
+    'Policy.Read.All'
+    'CrossTenantInformation.ReadBasic.All'
+)
+
+$script:Idea004Permissions = @(
+    'User.Read.All'
+    'Directory.Read.All'
+    'UserAuthenticationMethod.Read.All'
+    'AuditLog.Read.All'
+    'Policy.Read.All'
+    'CrossTenantInformation.ReadBasic.All'
+)
+
+# Source: C:\Scripts\EntraSecurityAssesment\readme.md, section 2.1
+$script:EntraSecurityAssessmentPermissions = @(
+    'Directory.Read.All'
+    'User.Read.All'
+    'Group.Read.All'
+    'UserAuthenticationMethod.Read.All'
+    'Policy.Read.All'
+    'Policy.Read.ConditionalAccess'
+    'RoleManagement.Read.Directory'
+    'RoleManagement.Read.All'
+    'PrivilegedAccess.Read.AzureADGroup'
+    'Device.Read.All'
+    'DeviceManagementManagedDevices.Read.All'
+    'CrossTenantInformation.ReadBasic.All'
+    'AdministrativeUnit.Read.All'
+    'Application.Read.All'
+    'AuditLog.Read.All'
+    'IdentityRiskyUser.Read.All'
+    'IdentityRiskEvent.Read.All'
+    'DelegatedAdminRelationship.Read.All'
+    'SecurityEvents.Read.All'
+)
+
 $script:ServiceDefinitions = @{
     MicrosoftGraph    = @{
         DisplayName   = 'Microsoft Graph / Entra ID'
         ResourceAppId = '00000003-0000-0000-c000-000000000000'
         Permissions   = @(
-            @{ Name = 'User.Read.All';                       Type = 'Application'; Default = $true;  Description = 'Read all users'                     }
-            @{ Name = 'Directory.Read.All';                  Type = 'Application'; Default = $true;  Description = 'Read directory data'                }
-            @{ Name = 'User.ReadWrite.All';                  Type = 'Application'; Default = $false; Description = 'Read and write all users'           }
-            @{ Name = 'Group.ReadWrite.All';                 Type = 'Application'; Default = $false; Description = 'Read and write all groups'          }
-            @{ Name = 'Directory.ReadWrite.All';             Type = 'Application'; Default = $false; Description = 'Full directory read/write'          }
-            @{ Name = 'Policy.Read.All';                     Type = 'Application'; Default = $false; Description = 'Read all policies'                  }
-            @{ Name = 'Policy.ReadWrite.ConditionalAccess';  Type = 'Application'; Default = $false; Description = 'Manage Conditional Access policies' }
-            @{ Name = 'AuditLog.Read.All';                   Type = 'Application'; Default = $false; Description = 'Read all audit logs'                }
-            @{ Name = 'RoleManagement.Read.Directory';       Type = 'Application'; Default = $false; Description = 'Read role assignments'              }
-            @{ Name = 'EntitlementManagement.ReadWrite.All'; Type = 'Application'; Default = $false; Description = 'Manage access packages'             }
+            @{ Name = 'User.Read.All'; Type = 'Application'; Default = $true;  Description = 'Read all users' }
+        )
+        Bundles       = @(
+            @{
+                Name        = 'IDEA-002 — Privileged Account Report'
+                Description = 'Scopes required by Get-PrivilegedAccountReport.ps1'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:Idea002Permissions
+            }
+            @{
+                Name        = 'IDEA-004 — Entra MFA Report'
+                Description = 'Scopes required by Get-EntraMFAReport.ps1'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:Idea004Permissions
+            }
+            @{
+                Name        = 'Entra Security Assessment'
+                Description = 'Read-only scopes for the Entra security assessment export'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:EntraSecurityAssessmentPermissions
+            }
         )
         AdminRoleId   = $null
         AdminRoleName = $null
@@ -256,6 +321,36 @@ function Show-Banner {
     Write-Host '║  for Microsoft Graph, Teams, Exchange Online and SharePoint Online   ║' -ForegroundColor Cyan
     Write-Host '╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host ''
+}
+
+
+function Show-MainMenu {
+    <#
+    .SYNOPSIS
+        Prompts for the task to perform.
+    .OUTPUTS
+        [string] 'NewRegistration' or 'AddPermissions'
+    #>
+    param()
+
+    Write-Host '  What do you want to do?' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host '    [1]  Create new app registration(s) with certificate authentication' -ForegroundColor White
+    Write-Host '    [2]  Add permissions to an existing app registration' -ForegroundColor White
+    Write-Host '    [Q]  Quit' -ForegroundColor White
+    Write-Host ''
+
+    while ($true) {
+        Write-Host '  Your selection: ' -NoNewline -ForegroundColor Cyan
+        $userInput = (Read-Host).Trim()
+
+        switch -Regex ($userInput) {
+            '^1$'    { return 'NewRegistration' }
+            '^2$'    { return 'AddPermissions' }
+            '^[Qq]$' { Write-Log 'User chose to quit.' -Level 'INFO'; exit 0 }
+            default  { Write-Host '  ✗ Enter 1, 2 or Q.' -ForegroundColor Red }
+        }
+    }
 }
 
 
@@ -419,7 +514,8 @@ function Show-PermissionsMenu {
     <#
     .SYNOPSIS
         Shows the permission list for a service, allows the user to toggle optional
-        permissions on/off, and returns the final selected permission array.
+        permissions and permission bundles on/off, and returns the final selected
+        permission array.
     .PARAMETER Service
         Key from $script:ServiceDefinitions (e.g. 'MicrosoftGraph').
     .OUTPUTS
@@ -432,8 +528,12 @@ function Show-PermissionsMenu {
 
     $def         = $script:ServiceDefinitions[$Service]
     $permissions = $def.Permissions
-    # Parallel bool array; starts with each permission's Default value
-    [bool[]]$selected = $permissions | ForEach-Object { $_.Default }
+    $bundles     = if ($def.ContainsKey('Bundles')) { $def.Bundles } else { @() }
+    $totalItems  = $permissions.Count + $bundles.Count
+
+    # Parallel bool arrays; start with each item's Default value
+    [bool[]]$selected       = $permissions | ForEach-Object { $_.Default }
+    [bool[]]$bundleSelected = @($bundles | ForEach-Object { $_.Default })
 
     while ($true) {
         Write-Host ''
@@ -453,9 +553,24 @@ function Show-PermissionsMenu {
             Write-Host ('  [{0,2}]  {1}  {2,-44}  {3} {4}' -f ($i + 1), $tick, $p.Name, $p.Description, $tag) -ForegroundColor White
         }
 
+        if ($bundles.Count -gt 0) {
+            Write-Host ''
+            Write-Host '  Permission bundles (adds all scopes in the bundle):' -ForegroundColor Yellow
+            for ($i = 0; $i -lt $bundles.Count; $i++) {
+                $b    = $bundles[$i]
+                $tick = if ($bundleSelected[$i]) { '[✓]' } else { '[ ]' }
+                Write-Host ('  [{0,2}]  {1}  {2,-44}  {3} ({4} scopes)' -f ($permissions.Count + $i + 1), $tick, $b.Name, $b.Description, $b.Permissions.Count) -ForegroundColor White
+                if ($bundleSelected[$i]) {
+                    foreach ($scope in $b.Permissions) {
+                        Write-Host ('          • {0}' -f $scope) -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+
         Write-Host ''
         Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor DarkGray
-        Write-Host "  [A] Accept and continue   [R] Reset to defaults   [1-$($permissions.Count)] Toggle permission" -ForegroundColor DarkGray
+        Write-Host "  [A] Accept and continue   [R] Reset to defaults   [1-$totalItems] Toggle item" -ForegroundColor DarkGray
         Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '  Action: ' -NoNewline -ForegroundColor Cyan
@@ -464,23 +579,32 @@ function Show-PermissionsMenu {
         if ($userInput -match '^[Aa]$') { break }
 
         if ($userInput -match '^[Rr]$') {
-            [bool[]]$selected = $permissions | ForEach-Object { $_.Default }
+            [bool[]]$selected       = $permissions | ForEach-Object { $_.Default }
+            [bool[]]$bundleSelected = @($bundles | ForEach-Object { $_.Default })
             Write-Host '  ↺ Permissions reset to defaults.' -ForegroundColor Yellow
             continue
         }
 
         $num = 0
-        if ([int]::TryParse($userInput, [ref]$num) -and $num -ge 1 -and $num -le $permissions.Count) {
-            $selected[$num - 1] = -not $selected[$num - 1]
+        if ([int]::TryParse($userInput, [ref]$num) -and $num -ge 1 -and $num -le $totalItems) {
+            if ($num -le $permissions.Count) {
+                $selected[$num - 1] = -not $selected[$num - 1]
+            }
+            else {
+                $bundleIndex = $num - $permissions.Count - 1
+                $bundleSelected[$bundleIndex] = -not $bundleSelected[$bundleIndex]
+            }
         }
         else {
-            Write-Host "  ✗ Invalid input. Type a number (1–$($permissions.Count)) to toggle, A to accept, or R to reset." -ForegroundColor Red
+            Write-Host "  ✗ Invalid input. Type a number (1–$totalItems) to toggle, A to accept, or R to reset." -ForegroundColor Red
         }
     }
 
     $result = [System.Collections.Generic.List[hashtable]]::new()
+    $seen   = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
     for ($i = 0; $i -lt $permissions.Count; $i++) {
-        if ($selected[$i]) {
+        if ($selected[$i] -and $seen.Add($permissions[$i].Name)) {
             $result.Add(@{
                 AppId = $def.ResourceAppId
                 Name  = $permissions[$i].Name
@@ -488,6 +612,20 @@ function Show-PermissionsMenu {
             })
         }
     }
+
+    for ($i = 0; $i -lt $bundles.Count; $i++) {
+        if (-not $bundleSelected[$i]) { continue }
+        foreach ($scope in $bundles[$i].Permissions) {
+            if ($seen.Add($scope)) {
+                $result.Add(@{
+                    AppId = $def.ResourceAppId
+                    Name  = $scope
+                    Type  = $bundles[$i].Type
+                })
+            }
+        }
+    }
+
     return $result.ToArray()
 }
 
@@ -717,6 +855,149 @@ function Get-TenantMetadata {
 }
 
 
+function Set-AppPermission {
+    <#
+    .SYNOPSIS
+        Adds application permissions to an app registration and grants admin consent.
+    .DESCRIPTION
+        Merges the requested permissions into the app's existing requiredResourceAccess so
+        permissions already on the app are never removed, then grants admin consent for each
+        resolved app role. Permissions already consented are counted as succeeded.
+    .PARAMETER ApplicationObjectId
+        Object ID (not AppId) of the application.
+    .PARAMETER ServicePrincipalId
+        Object ID of the app's service principal.
+    .PARAMETER Permissions
+        Array of hashtables with keys AppId, Name, Type.
+    .OUTPUTS
+        [hashtable] ConsentSucceeded, ConsentFailed, NotFound
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ApplicationObjectId,
+
+        [Parameter(Mandatory)]
+        [string]$ServicePrincipalId,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [hashtable[]]$Permissions
+    )
+
+    # Build permissions grouped by resource AppId
+    $permsByResource = @{}
+    foreach ($perm in $Permissions) {
+        if (-not $permsByResource.ContainsKey($perm.AppId)) {
+            $permsByResource[$perm.AppId] = [System.Collections.Generic.List[hashtable]]::new()
+        }
+        $permsByResource[$perm.AppId].Add($perm)
+    }
+
+    # Start from what the app already has so nothing is dropped on update
+    $existingAccess = @{}
+    $currentApp     = Get-MgApplication -ApplicationId $ApplicationObjectId -ErrorAction Stop
+    foreach ($rra in @($currentApp.RequiredResourceAccess | Where-Object { $_ })) {
+        $list = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($ra in @($rra.ResourceAccess | Where-Object { $_ })) {
+            $list.Add(@{ Id = $ra.Id; Type = $ra.Type })
+        }
+        $existingAccess[$rra.ResourceAppId] = $list
+    }
+
+    $consentItems = [System.Collections.Generic.List[hashtable]]::new()
+    $notFound     = 0
+
+    foreach ($resourceAppId in $permsByResource.Keys) {
+        $resourceSp = Get-MgServicePrincipal -Filter "AppId eq '$resourceAppId'" -ErrorAction Stop
+
+        if (-not $existingAccess.ContainsKey($resourceAppId)) {
+            $existingAccess[$resourceAppId] = [System.Collections.Generic.List[hashtable]]::new()
+        }
+        $resourceAccess = $existingAccess[$resourceAppId]
+
+        foreach ($perm in $permsByResource[$resourceAppId]) {
+            $appRole = $resourceSp.AppRoles |
+                       Where-Object { $_.Value -eq $perm.Name -and $_.AllowedMemberTypes -contains 'Application' }
+
+            if ($appRole) {
+                if (-not ($resourceAccess | Where-Object { $_.Id -eq $appRole.Id })) {
+                    $resourceAccess.Add(@{ Id = $appRole.Id; Type = 'Role' })
+                }
+                $consentItems.Add(@{
+                    SpId       = $ServicePrincipalId
+                    ResourceId = $resourceSp.Id
+                    RoleId     = $appRole.Id
+                    PermName   = $perm.Name
+                })
+                Write-Log "    Found: $($perm.Name)" -Level 'INFO'
+            }
+            else {
+                Write-Log "    ⚠ Permission '$($perm.Name)' not found on resource SP — skipping" -Level 'WARNING'
+                $notFound++
+            }
+        }
+    }
+
+    $requiredResourceAccess = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($resourceAppId in $existingAccess.Keys) {
+        if ($existingAccess[$resourceAppId].Count -gt 0) {
+            $requiredResourceAccess.Add(@{
+                ResourceAppId  = $resourceAppId
+                ResourceAccess = $existingAccess[$resourceAppId].ToArray()
+            })
+        }
+    }
+
+    if ($requiredResourceAccess.Count -gt 0) {
+        Update-MgApplication -ApplicationId $ApplicationObjectId -RequiredResourceAccess $requiredResourceAccess.ToArray() -ErrorAction Stop
+        Write-Log '  ✓ Permissions set on application manifest' -Level 'SUCCESS'
+    }
+
+    Start-Sleep -Seconds 3   # Allow propagation before granting consent
+
+    # Grant admin consent (with dedup check)
+    $consentSucceeded = 0
+    $consentFailed    = 0
+
+    foreach ($item in $consentItems) {
+        try {
+            $existing = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $item.SpId -ErrorAction SilentlyContinue |
+                        Where-Object { $_.AppRoleId -eq $item.RoleId -and $_.ResourceId -eq $item.ResourceId }
+
+            if ($existing) {
+                Write-Log "    Already consented: $($item.PermName)" -Level 'INFO'
+                $consentSucceeded++
+                continue
+            }
+
+            New-MgServicePrincipalAppRoleAssignment `
+                -ServicePrincipalId $item.SpId `
+                -PrincipalId        $item.SpId `
+                -ResourceId         $item.ResourceId `
+                -AppRoleId          $item.RoleId `
+                -ErrorAction Stop | Out-Null
+
+            Write-Log "    ✓ Consent granted: $($item.PermName)" -Level 'SUCCESS'
+            $consentSucceeded++
+        }
+        catch {
+            Write-Log "    ⚠ Could not grant consent for $($item.PermName): $($_.Exception.Message)" -Level 'WARNING'
+            $consentFailed++
+        }
+    }
+
+    if ($consentFailed -gt 0) {
+        Write-Log "  ⚠ $consentFailed permission(s) require manual admin consent in the Entra portal" -Level 'WARNING'
+    }
+
+    return @{
+        ConsentSucceeded = $consentSucceeded
+        ConsentFailed    = $consentFailed
+        NotFound         = $notFound
+    }
+}
+
+
 function New-ServiceAppRegistration {
     <#
     .SYNOPSIS
@@ -778,98 +1059,187 @@ function New-ServiceAppRegistration {
     Update-MgApplication -ApplicationId $app.Id -KeyCredentials @($keyCredential) -ErrorAction Stop
     Write-Log "  ✓ Certificate attached — Thumbprint: $($Certificate.Thumbprint)" -Level 'SUCCESS'
 
-    # Build permissions grouped by resource AppId
-    $permsByResource = @{}
-    foreach ($perm in $Permissions) {
-        if (-not $permsByResource.ContainsKey($perm.AppId)) {
-            $permsByResource[$perm.AppId] = [System.Collections.Generic.List[hashtable]]::new()
-        }
-        $permsByResource[$perm.AppId].Add($perm)
-    }
-
-    $requiredResourceAccess = [System.Collections.Generic.List[hashtable]]::new()
-    $consentItems           = [System.Collections.Generic.List[hashtable]]::new()
-
-    foreach ($resourceAppId in $permsByResource.Keys) {
-        $resourceSp     = Get-MgServicePrincipal -Filter "AppId eq '$resourceAppId'" -ErrorAction Stop
-        $resourceAccess = [System.Collections.Generic.List[hashtable]]::new()
-
-        foreach ($perm in $permsByResource[$resourceAppId]) {
-            $appRole = $resourceSp.AppRoles |
-                       Where-Object { $_.Value -eq $perm.Name -and $_.AllowedMemberTypes -contains 'Application' }
-
-            if ($appRole) {
-                $resourceAccess.Add(@{ Id = $appRole.Id; Type = 'Role' })
-                $consentItems.Add(@{
-                    SpId       = $sp.Id
-                    ResourceId = $resourceSp.Id
-                    RoleId     = $appRole.Id
-                    PermName   = $perm.Name
-                })
-                Write-Log "    Found: $($perm.Name)" -Level 'INFO'
-            }
-            else {
-                Write-Log "    ⚠ Permission '$($perm.Name)' not found on resource SP — skipping" -Level 'WARNING'
-            }
-        }
-
-        if ($resourceAccess.Count -gt 0) {
-            $requiredResourceAccess.Add(@{
-                ResourceAppId  = $resourceAppId
-                ResourceAccess = $resourceAccess.ToArray()
-            })
-        }
-    }
-
-    if ($requiredResourceAccess.Count -gt 0) {
-        Update-MgApplication -ApplicationId $app.Id -RequiredResourceAccess $requiredResourceAccess.ToArray() -ErrorAction Stop
-        Write-Log "  ✓ Permissions set on application manifest" -Level 'SUCCESS'
-    }
-
-    Start-Sleep -Seconds 3   # Allow propagation before granting consent
-
-    # Grant admin consent (with dedup check)
-    $consentSucceeded = 0
-    $consentFailed    = 0
-
-    foreach ($item in $consentItems) {
-        try {
-            $existing = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $item.SpId -ErrorAction SilentlyContinue |
-                        Where-Object { $_.AppRoleId -eq $item.RoleId -and $_.ResourceId -eq $item.ResourceId }
-
-            if ($existing) {
-                Write-Log "    Already consented: $($item.PermName)" -Level 'INFO'
-                $consentSucceeded++
-                continue
-            }
-
-            New-MgServicePrincipalAppRoleAssignment `
-                -ServicePrincipalId $item.SpId `
-                -PrincipalId        $item.SpId `
-                -ResourceId         $item.ResourceId `
-                -AppRoleId          $item.RoleId `
-                -ErrorAction Stop | Out-Null
-
-            Write-Log "    ✓ Consent granted: $($item.PermName)" -Level 'SUCCESS'
-            $consentSucceeded++
-        }
-        catch {
-            Write-Log "    ⚠ Could not grant consent for $($item.PermName): $($_.Exception.Message)" -Level 'WARNING'
-            $consentFailed++
-        }
-    }
-
-    if ($consentFailed -gt 0) {
-        Write-Log "  ⚠ $consentFailed permission(s) require manual admin consent in the Entra portal" -Level 'WARNING'
-    }
+    $consent = Set-AppPermission `
+        -ApplicationObjectId $app.Id `
+        -ServicePrincipalId  $sp.Id `
+        -Permissions         $Permissions
 
     return @{
         AppId              = $app.AppId
         ObjectId           = $app.Id
         ServicePrincipalId = $sp.Id
-        ConsentSucceeded   = $consentSucceeded
-        ConsentFailed      = $consentFailed
+        ConsentSucceeded   = $consent.ConsentSucceeded
+        ConsentFailed      = $consent.ConsentFailed
     }
+}
+
+
+function Select-ExistingApplication {
+    <#
+    .SYNOPSIS
+        Lets the user pick an existing app registration in the connected tenant.
+    .OUTPUTS
+        [hashtable] Id, AppId, DisplayName — or $null when the user cancels.
+    #>
+    param()
+
+    while ($true) {
+        Write-Host ''
+        Write-Host '  Filter by display name (leave empty for the first 50 apps): ' -NoNewline -ForegroundColor Cyan
+        $filterText = (Read-Host).Trim()
+
+        $params = @{ Top = 50; Property = @('Id', 'AppId', 'DisplayName'); ErrorAction = 'Stop' }
+        if ($filterText) {
+            $params['Filter'] = "startswith(displayName,'{0}')" -f ($filterText -replace "'", "''")
+        }
+
+        $apps = @(Get-MgApplication @params | Sort-Object DisplayName)
+
+        if ($apps.Count -eq 0) {
+            Write-Host '  ✗ No app registrations matched that filter.' -ForegroundColor Red
+            continue
+        }
+
+        Write-Host ''
+        for ($i = 0; $i -lt $apps.Count; $i++) {
+            Write-Host ('  [{0,2}]  {1,-50}  {2}' -f ($i + 1), $apps[$i].DisplayName, $apps[$i].AppId) -ForegroundColor White
+        }
+
+        Write-Host ''
+        Write-Host "  [1-$($apps.Count)] Select app   [F] New filter   [Q] Cancel" -ForegroundColor DarkGray
+        Write-Host '  Your selection: ' -NoNewline -ForegroundColor Cyan
+        $choice = (Read-Host).Trim()
+
+        if ($choice -match '^[Qq]$') { return $null }
+        if ($choice -match '^[Ff]$') { continue }
+
+        $num = 0
+        if ([int]::TryParse($choice, [ref]$num) -and $num -ge 1 -and $num -le $apps.Count) {
+            $app = $apps[$num - 1]
+            return @{
+                Id          = $app.Id
+                AppId       = $app.AppId
+                DisplayName = $app.DisplayName
+            }
+        }
+
+        Write-Host "  ✗ Invalid selection. Enter 1–$($apps.Count), F or Q." -ForegroundColor Red
+    }
+}
+
+
+function Add-PermissionToExistingApp {
+    <#
+    .SYNOPSIS
+        Adds Microsoft Graph application permissions to an existing app registration and
+        grants admin consent.
+    .DESCRIPTION
+        Uses the same permission menu as a new registration, so the IDEA-002, IDEA-004 and
+        Entra Security Assessment bundles can be applied to an app that already exists.
+        Existing permissions on the app are preserved.
+    .OUTPUTS
+        [bool] $true when every requested permission is consented on the app afterwards.
+    #>
+    param()
+
+    $graphAppId = $script:ServiceDefinitions.MicrosoftGraph.ResourceAppId
+
+    $app = Select-ExistingApplication
+    if (-not $app) {
+        Write-Log 'No application selected — nothing was changed.' -Level 'WARNING'
+        return $false
+    }
+
+    Write-Log "Selected app: $($app.DisplayName) (AppId: $($app.AppId))" -Level 'INFO'
+
+    $sp = Get-MgServicePrincipal -Filter "appId eq '$($app.AppId)'" -ErrorAction Stop | Select-Object -First 1
+    if (-not $sp) {
+        Write-Log '  Application has no service principal — creating one...' -Level 'INFO'
+        $sp = New-MgServicePrincipal -AppId $app.AppId -ErrorAction Stop
+        Start-Sleep -Seconds 5   # Allow propagation before consent
+        Write-Log "  ✓ Service principal created — Id: $($sp.Id)" -Level 'SUCCESS'
+    }
+
+    $graphSp     = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'" -ErrorAction Stop | Select-Object -First 1
+    $assignments = @(Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction Stop)
+    $granted     = @($assignments |
+                     Where-Object { $_.ResourceId -eq $graphSp.Id } |
+                     ForEach-Object { $roleId = $_.AppRoleId; ($graphSp.AppRoles | Where-Object { $_.Id -eq $roleId }).Value } |
+                     Where-Object { $_ })
+
+    Write-Host ''
+    if ($granted.Count -gt 0) {
+        Write-Host "  Graph permissions already consented on $($app.DisplayName):" -ForegroundColor Yellow
+        foreach ($name in ($granted | Sort-Object)) { Write-Host "    • $name" -ForegroundColor Gray }
+    }
+    else {
+        Write-Host "  $($app.DisplayName) has no consented Microsoft Graph application permissions." -ForegroundColor Yellow
+    }
+
+    $permissions = @(Show-PermissionsMenu -Service 'MicrosoftGraph')
+
+    if ($permissions.Count -eq 0) {
+        Write-Log 'No permissions selected — nothing was changed.' -Level 'WARNING'
+        return $false
+    }
+
+    $toAdd = @($permissions | Where-Object { $_.Name -notin $granted })
+
+    Write-Host ''
+    Write-Host "  The following will be added to $($app.DisplayName) and admin-consented:" -ForegroundColor Yellow
+    if ($toAdd.Count -eq 0) {
+        Write-Host '    (nothing new — all selected permissions are already consented)' -ForegroundColor Gray
+    }
+    else {
+        foreach ($perm in $toAdd) { Write-Host "    • $($perm.Name)" -ForegroundColor Gray }
+    }
+
+    Write-Host ''
+    Write-Host '  Proceed? (Y/N): ' -NoNewline -ForegroundColor Yellow
+    if ((Read-Host).Trim() -notmatch '^[Yy]$') {
+        Write-Log 'User cancelled. No changes were made.' -Level 'WARNING'
+        return $false
+    }
+
+    Write-Host ''
+    Write-Log "── Updating $($app.DisplayName) ──────────────────────────────" -Level 'INFO'
+
+    $consent = Set-AppPermission `
+        -ApplicationObjectId $app.Id `
+        -ServicePrincipalId  $sp.Id `
+        -Permissions         $permissions
+
+    # Read the result back from the tenant before reporting success.
+    Write-Log '  Verifying permissions...' -Level 'INFO'
+    Start-Sleep -Seconds 5
+
+    $verifyAssignments = @(Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction Stop)
+    $verifyGranted     = @($verifyAssignments |
+                           Where-Object { $_.ResourceId -eq $graphSp.Id } |
+                           ForEach-Object { $roleId = $_.AppRoleId; ($graphSp.AppRoles | Where-Object { $_.Id -eq $roleId }).Value } |
+                           Where-Object { $_ })
+
+    $missing = @($permissions.Name | Where-Object { $_ -notin $verifyGranted })
+
+    Write-Host ''
+    if ($missing.Count -gt 0) {
+        Write-Log "✗ $($missing.Count) permission(s) are not consented on $($app.DisplayName):" -Level 'ERROR'
+        foreach ($name in $missing) { Write-Log "    • $name" -Level 'ERROR' }
+        Write-Host '  Grant them manually: Entra portal → App registrations → API permissions → Grant admin consent' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host "  Log file: $script:LogFile" -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Log "✓ All $($permissions.Count) selected permission(s) are consented on $($app.DisplayName)" -Level 'SUCCESS'
+    if ($consent.NotFound -gt 0) {
+        Write-Log "⚠ $($consent.NotFound) permission(s) could not be resolved on the Microsoft Graph service principal" -Level 'WARNING'
+    }
+    Write-Host ''
+    Write-Host "  AppId    : $($app.AppId)" -ForegroundColor White
+    Write-Host "  Log file : $script:LogFile" -ForegroundColor White
+    Write-Host ''
+    return $true
 }
 
 
@@ -1515,7 +1885,18 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     Show-Banner
 
+    $mode = Show-MainMenu
+
+    if ($mode -eq 'AddPermissions') {
+        Write-Host ''
+        Connect-ToMicrosoftGraph
+        $ok = Add-PermissionToExistingApp
+        if (-not $ok) { exit 1 }
+        exit 0
+    }
+
     # ── Step 1: Service Selection ──────────────────────────────────────────────
+    Write-Host ''
     Write-Host '  Step 1 of 5 — Select Services' -ForegroundColor Yellow
     Write-Host ''
     $selectedServices = Show-ServiceSelectionMenu

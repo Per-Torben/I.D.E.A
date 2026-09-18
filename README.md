@@ -59,9 +59,11 @@ Resolves complex PIM chains, nested groups, and group eligibility scenarios to p
 Interactive, menu-driven tool that creates Microsoft Entra ID app registrations with **certificate-based authentication** for one or more M365 services — and generates ready-to-use PowerShell connection scripts for each.
 
 **Key Capabilities**
+- Main menu: create new app registration(s), or **add permissions to an existing app registration**
 - Service selection menu: Microsoft Graph / Entra ID, Microsoft Teams, Exchange Online, SharePoint Online (single or all)
 - Certificate menu: create new self-signed (4096-bit RSA, configurable duration, default 180 days) or use an existing `.cer` file
-- Per-service permission review with toggle menu — defaults are minimal/read-only, optional extras can be enabled
+- Per-service permission review with toggle menu — the Graph menu defaults to `User.Read.All` only, plus one-click permission bundles for **I.D.E.A. 002**, **I.D.E.A. 004** and **Entra Security Assessment** (bundles can be combined; duplicates are removed)
+- Existing app registrations can be topped up with those same bundles — current permissions are preserved, only what is missing is added and admin-consented
 - App name prefix prompt with full preview table of app names and output file names before creating
 - Creates one app registration per service, attaches shared certificate, grants admin consent
 - Automatically assigns the Teams Administrator role to the Teams app
