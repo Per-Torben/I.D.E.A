@@ -109,6 +109,26 @@ Interactive, menu-driven MFA report tool that generates a detailed Multi-Factor 
 
 ---
 
+### [I.D.E.A. 005 – SMS MFA Hunter](IDEA-005-SmsHunter/)
+Interactive, menu-driven tool that finds every user with SMS or voice call registered as an MFA method, shows who actually uses it, and checks whether the tenant's authentication methods policy, registration campaign and passkey configuration will move them off it.
+
+**Key Capabilities**
+- Scales: bulk pre-filter via the registration details report, per-user calls only for users with a phone method
+- Phone detail: number, phone type, SMS sign-in state, effective default MFA method (system-preferred aware)
+- Optional sign-in log scan for users who actually completed MFA with SMS/voice
+- Policy posture: migration state, system-preferred MFA, every method configuration, SMS/Voice targets and SMS sign-in
+- Registration campaign: state, snooze, enforcement, targets and targeted method
+- Passkey profiles: types, attestation, key restrictions, which groups get which profile, TAP onboarding path
+- Cross-checks: users still allowed SMS/voice, outside the campaign, or unable to register a passkey
+- Risk levels: Critical → High → Medium → Low, plus Unknown for RMAU-protected users
+- Self-contained HTML report in the I.D.E.A. 004 style, plus semicolon-delimited CSV
+
+**Use Case:** Plan and track the move away from SMS/voice MFA ahead of the 2027-02-01 retirement.
+
+📖 **[Full Documentation](IDEA-005-SmsHunter/README.md)**
+
+---
+
 ## Getting Started
 1. Browse the I.D.E.A. folders above  
 2. Read the specific README.md for prerequisites and usage  
