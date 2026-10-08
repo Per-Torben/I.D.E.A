@@ -379,6 +379,7 @@ function Read-SignInScanDays {
     Write-Host ""
     Write-Host "  Sign-in log scan finds users who actually completed MFA with SMS/voice." -ForegroundColor Yellow
     Write-Host "  It reads every MFA sign-in in the window (beta endpoint, can be slow in large tenants)." -ForegroundColor Gray
+    Write-Host "  Sign-ins from the last few minutes may not be ingested yet." -ForegroundColor Gray
     $answer = Read-Host "  Days to scan (1-30, 0 = skip, default=7)"
     if ([string]::IsNullOrWhiteSpace($answer)) { return 7 }
     $days = 0
@@ -1426,6 +1427,34 @@ function Find-SmsUsers {
         Write-Progress -Activity "Checking users missing from the registration report" -Completed
     }
 
+    # The registration report lags, so a user can use SMS before the report shows a phone method.
+    if ($usage) {
+        $candidateIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($c in $candidates) { [void]$candidateIds.Add($c.Id) }
+        $missed = @($usage.Keys | Where-Object { -not $candidateIds.Contains($_) })
+        if ($missed.Count -gt 0) {
+            Write-Log "$($missed.Count) user(s) used SMS/voice in sign-ins but have no phone method in the registration report. Checking them directly." -Level "WARNING"
+            if ($null -eq $adminIds) { $adminIds = Get-AdminUserIds }
+            foreach ($id in $missed) {
+                $direct = Get-UserMethodsDirect -UserId $id
+                $dirUser = $directory[$id]
+                $reportRow = $details | Where-Object { $_.id -eq $id } | Select-Object -First 1
+                $candidates.Add([PSCustomObject]@{
+                    Id              = $id
+                    Upn             = if ($dirUser) { $dirUser.userPrincipalName } else { $id }
+                    DisplayName     = if ($dirUser) { $dirUser.displayName } else { '' }
+                    Methods         = @($direct.Methods)
+                    Preferred       = if ($reportRow) { "$($reportRow.userPreferredMethodForSecondaryAuthentication)" } else { '' }
+                    SystemPreferred = ''
+                    Effective       = if ($reportRow) { "$($reportRow.userPreferredMethodForSecondaryAuthentication)" } else { '' }
+                    IsAdmin         = if ($reportRow) { [bool]$reportRow.isAdmin } else { $adminIds.Contains($id) }
+                    Source          = 'Sign-in log'
+                    Detail          = [PSCustomObject]@{ Status = $direct.Status; Phones = $direct.Phones; Error = $direct.Error }
+                })
+            }
+        }
+    }
+
     $rows = [System.Collections.Generic.List[object]]::new()
     $i = 0
     $total = $candidates.Count
@@ -2003,7 +2032,7 @@ function renderTable() {
         const other = r.otherMethods ? esc(r.otherMethods) : '<span class="badge badge-high">None</span>';
         const uses = SCAN_DAYS === 0 ? '<span class="muted">not scanned</span>' : (r.smsUseCount > 0 ? '<span class="badge badge-high">' + r.smsUseCount + '</span> <span class="muted">' + esc(r.lastSmsUse) + '</span>' : '0');
         return '<tr class="risk-' + riskKey(r.riskLevel) + '">' +
-            '<td>' + esc(r.displayName) + (r.dataSource === 'Direct lookup' ? ' <span class="muted" title="Not in the registration report">*</span>' : '') + '</td>' +
+            '<td>' + esc(r.displayName) + (r.dataSource !== 'Registration report' ? ' <span class="muted" title="Found via ' + esc(r.dataSource) + ', not the registration report">*</span>' : '') + '</td>' +
             '<td>' + esc(r.upn) + '</td>' +
             '<td><span class="badge badge-' + key(r.userType) + '">' + esc(r.userType) + '</span></td>' +
             '<td><span class="badge badge-' + key(r.accountStatus) + '">' + esc(r.accountStatus) + '</span></td>' +

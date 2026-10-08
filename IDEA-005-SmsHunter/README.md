@@ -119,10 +119,12 @@ The hunt asks how many days of sign-in logs to scan (default 7, 0 to skip). The 
 - Policy posture grouped by area, collapsible, with Pass/Warn/Fail/Info badges
 - User table: sorting, text search (name/UPN/phone), filters for risk, type, account, admin, SMS/voice only, SMS policy, campaign scope, passkey policy, SMS use, last sign-in
 - Method chip filters built from the data, with AND/OR and "only selected methods"
-- Users found by direct lookup (missing from the registration report) are marked with `*`
+- Users found by direct lookup or the sign-in scan (missing from the registration report's phone set) are marked with `*`
 
 ## Known Limitations
 - The registration details report lags behind real registrations. Users missing from it are checked directly; recent changes for users already in it may not show yet.
+- Sign-in logs are ingested with a delay of several minutes. Very recent sign-ins may be missing from the scan.
+- Users who used SMS/voice in the scanned window are always included, even if the registration report does not show a phone method yet.
 - Sign-in log matching uses the `authenticationMethod` text (`Text message`, `Phone call`, ...). Validated against live data without SMS sign-ins; review the match pattern if your tenant reports different strings.
 - Passkey profile to group mapping uses `includeTargets[].allowedPasskeyProfiles` as returned by Graph. Targets without that list are shown against the default profile.
 - When the registration campaign is in `default` (Microsoft-managed) state, its scope cannot be evaluated per user.
