@@ -1893,13 +1893,11 @@ $retirementHtml
 <div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option><option>Unknown</option><option>N/A</option></select></div>
 <div class="filter-group"><label>User Type</label><select id="filterType" data-field="userType"><option value="">All</option></select></div>
 <div class="filter-group"><label>Account Status</label><select id="filterStatus" data-field="accountStatus"><option value="">All</option></select></div>
-<div class="filter-group"><label>Is Admin</label><select id="filterAdmin"><option value="">All</option><option>Yes</option><option>No</option></select></div>
 <div class="filter-group"><label>SMS/Voice Only</label><select id="filterPhoneOnly"><option value="">All</option><option>Yes</option><option>No</option></select></div>
 <div class="filter-group"><label>SMS Policy</label><select id="filterSmsPolicy" data-field="smsPolicy"><option value="">All</option></select></div>
-<div class="filter-group"><label>Campaign Scope</label><select id="filterCampaign" data-field="campaign"><option value="">All</option></select></div>
 <div class="filter-group"><label>Passkey Policy</label><select id="filterPasskey" data-field="passkeyPolicy"><option value="">All</option></select></div>
-<div class="filter-group"><label>Used SMS (scan)</label><select id="filterUsed"><option value="">All</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
-<div class="filter-group"><label>Last Sign-In</label><select id="filterSignIn"><option value="">All</option><option value="Active">Active (30 days)</option><option value="Inactive30">Inactive 30+ days</option><option value="Inactive90">Inactive 90+ days</option><option value="Never">Never</option></select></div>
+<div class="filter-group"><label>Campaign Scope</label><select id="filterCampaign" data-field="campaign"><option value="">All</option></select></div>
+<div class="filter-group"><label>Has signed in with SMS</label><select id="filterUsed"><option value="">All</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
 <div class="filter-group"><button class="btn-reset" onclick="resetFilters()">Reset All</button></div>
 </div>
 <div class="method-filters" id="methodFilters">
@@ -1920,17 +1918,14 @@ $retirementHtml
 <th data-col="upn" onclick="sortTable('upn')">UPN<span class="sort-icon"></span></th>
 <th data-col="userType" onclick="sortTable('userType')">Type<span class="sort-icon"></span></th>
 <th data-col="accountStatus" onclick="sortTable('accountStatus')">Account<span class="sort-icon"></span></th>
-<th data-col="isAdmin" onclick="sortTable('isAdmin')">Admin<span class="sort-icon"></span></th>
 <th data-col="phoneNumbers" onclick="sortTable('phoneNumbers')">Phone<span class="sort-icon"></span></th>
 <th data-col="smsSignInState" onclick="sortTable('smsSignInState')" title="smsSignInState from the phone method">SMS Sign-in<span class="sort-icon"></span></th>
-<th data-col="effectiveMethod" onclick="sortTable('effectiveMethod')" title="System-preferred method when enabled, otherwise the user default">Default Method<span class="sort-icon"></span></th>
 <th data-col="otherMethods" onclick="sortTable('otherMethods')">Other Methods<span class="sort-icon"></span></th>
 <th data-col="smsPolicy" onclick="sortTable('smsPolicy')">SMS Policy<span class="sort-icon"></span></th>
 <th data-col="voicePolicy" onclick="sortTable('voicePolicy')">Voice Policy<span class="sort-icon"></span></th>
-<th data-col="campaign" onclick="sortTable('campaign')">Campaign<span class="sort-icon"></span></th>
 <th data-col="passkeyPolicy" onclick="sortTable('passkeyPolicy')">Passkey Policy<span class="sort-icon"></span></th>
+<th data-col="campaign" onclick="sortTable('campaign')">Campaign<span class="sort-icon"></span></th>
 <th data-col="smsUseCount" onclick="sortTable('smsUseCount')">SMS Uses<span class="sort-icon"></span></th>
-<th data-col="lastSignIn" onclick="sortTable('lastSignIn')">Last Sign-In<span class="sort-icon"></span></th>
 <th data-col="riskLevel" onclick="sortTable('riskLevel')">Risk<span class="sort-icon"></span></th>
 <th data-col="riskNotes" onclick="sortTable('riskNotes')">Risk Notes<span class="sort-icon"></span></th>
 </tr>
@@ -1979,32 +1974,21 @@ function fillSelects() {
 function renderTable() {
     const search = document.getElementById('searchBox').value.toLowerCase();
     const v = function(id) { return document.getElementById(id).value; };
-    const fRisk = v('filterRisk'), fType = v('filterType'), fStatus = v('filterStatus'), fAdmin = v('filterAdmin');
+    const fRisk = v('filterRisk'), fType = v('filterType'), fStatus = v('filterStatus');
     const fOnly = v('filterPhoneOnly'), fSms = v('filterSmsPolicy'), fCamp = v('filterCampaign'), fPk = v('filterPasskey');
-    const fUsed = v('filterUsed'), fSignIn = v('filterSignIn');
+    const fUsed = v('filterUsed');
 
     let filtered = DATA.filter(function(r) {
         if (search && !r.displayName.toLowerCase().includes(search) && !r.upn.toLowerCase().includes(search) && !r.phoneNumbers.toLowerCase().includes(search)) return false;
         if (fRisk && r.riskLevel !== fRisk) return false;
         if (fType && r.userType !== fType) return false;
         if (fStatus && r.accountStatus !== fStatus) return false;
-        if (fAdmin && r.isAdmin !== fAdmin) return false;
         if (fOnly && r.phoneOnly !== fOnly) return false;
         if (fSms && r.smsPolicy !== fSms) return false;
         if (fCamp && r.campaign !== fCamp) return false;
         if (fPk && r.passkeyPolicy !== fPk) return false;
         if (fUsed === 'Yes' && !(r.smsUseCount > 0)) return false;
         if (fUsed === 'No' && r.smsUseCount > 0) return false;
-        if (fSignIn) {
-            if (fSignIn === 'Never') { if (r.lastSignIn !== 'Never') return false; }
-            else {
-                const d = new Date(r.lastSignIn);
-                const age = r.lastSignIn === 'Never' || isNaN(d) ? Infinity : (Date.now() - d);
-                if (fSignIn === 'Active' && age > 30*86400000) return false;
-                if (fSignIn === 'Inactive30' && age <= 30*86400000) return false;
-                if (fSignIn === 'Inactive90' && age <= 90*86400000) return false;
-            }
-        }
         if (activeMethodFilters.length > 0) {
             const um = Array.isArray(r.methodTags) ? r.methodTags : [];
             if (onlySelectedMethods && !um.every(function(m) { return activeMethodFilters.includes(m); })) return false;
@@ -2036,17 +2020,14 @@ function renderTable() {
             '<td>' + esc(r.upn) + '</td>' +
             '<td><span class="badge badge-' + key(r.userType) + '">' + esc(r.userType) + '</span></td>' +
             '<td><span class="badge badge-' + key(r.accountStatus) + '">' + esc(r.accountStatus) + '</span></td>' +
-            '<td>' + yesBadge(r.isAdmin, true) + '</td>' +
             '<td>' + phone + '</td>' +
             '<td>' + esc(r.smsSignInState) + '</td>' +
-            '<td>' + esc(r.effectiveMethod) + '</td>' +
             '<td>' + other + '</td>' +
             '<td>' + yesBadge(r.smsPolicy, true) + '</td>' +
             '<td>' + yesBadge(r.voicePolicy, true) + '</td>' +
-            '<td>' + yesBadge(r.campaign, false) + '</td>' +
             '<td>' + yesBadge(r.passkeyPolicy, false) + '</td>' +
+            '<td>' + yesBadge(r.campaign, false) + '</td>' +
             '<td>' + uses + '</td>' +
-            '<td>' + esc(r.lastSignIn) + '</td>' +
             '<td><span class="badge badge-' + riskKey(r.riskLevel) + '">' + esc(r.riskLevel) + '</span></td>' +
             '<td>' + esc(r.riskNotes) + '</td></tr>';
     }).join('');

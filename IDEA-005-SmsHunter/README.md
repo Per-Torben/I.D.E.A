@@ -117,7 +117,7 @@ The hunt asks how many days of sign-in logs to scan (default 7, 0 to skip). The 
 - Fallback bar: SMS/voice only vs. other MFA vs. phishing-resistant
 - Pie charts: risk, policy posture, phone numbers by country
 - Policy posture grouped by area, collapsible, with Pass/Warn/Fail/Info badges
-- User table: sorting, text search (name/UPN/phone), filters for risk, type, account, admin, SMS/voice only, SMS policy, campaign scope, passkey policy, SMS use, last sign-in
+- User table: sorting, text search (name/UPN/phone), filters for risk, type, account, SMS/voice only, SMS policy, passkey policy, campaign scope, SMS use
 - Method chip filters built from the data, with AND/OR and "only selected methods"
 - Users found by direct lookup or the sign-in scan (missing from the registration report's phone set) are marked with `*`
 
