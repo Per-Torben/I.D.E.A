@@ -1060,7 +1060,7 @@ function Get-CrossCheckFindings {
 
     $area = 'Cross-checks'
     $findings = @()
-    $active = @($Users | Where-Object { $_.AccountEnabled -eq $true -and $_.DataStatus -eq 'Ok' })
+    $active = @($Users | Where-Object { $_.AccountEnabled -eq $true })
     if ($active.Count -eq 0) { return $findings }
 
     $phoneOnly = @($active | Where-Object { $_.PhoneOnly })
@@ -1310,9 +1310,7 @@ function Get-SmsRiskLevel {
     .SYNOPSIS
         Scores one user. Returns @{ Level; Notes }.
     .NOTES
-        Unknown  : RMAU protected or unreadable.
         N/A      : Account disabled.
-        Critical : Admin, has SMS/voice, no phishing-resistant method.
         High     : SMS/voice is the ONLY MFA method, the effective default method, or was used
                    for MFA in the scanned sign-in window.
         Medium   : SMS/voice next to Authenticator/OATH, no phishing-resistant method.
@@ -1321,10 +1319,6 @@ function Get-SmsRiskLevel {
     [CmdletBinding()]
     param([Parameter(Mandatory)][PSCustomObject]$Finding)
 
-    if ($Finding.DataStatus -ne 'Ok') {
-        $why = if ($Finding.DataStatus -eq 'AccessDenied') { 'Restricted Management AU or access denied' } else { 'Authentication methods could not be read' }
-        return @{ Level = 'Unknown'; Notes = $why }
-    }
     if ($Finding.AccountEnabled -ne $true) {
         return @{ Level = 'N/A'; Notes = 'Account disabled' }
     }
@@ -1333,9 +1327,6 @@ function Get-SmsRiskLevel {
     if ($Finding.SmsSignInCount -gt 0) { $notes += "Used SMS/voice for MFA $($Finding.SmsSignInCount)x recently" }
     if ("$($Finding.SmsSignInState)" -match '(^|,\s*)ready') { $notes += 'SMS sign-in ready' }
 
-    if ($Finding.IsAdmin -and -not $Finding.HasPhishingResistant) {
-        return @{ Level = 'Critical'; Notes = (@('Admin with SMS/voice and no phishing-resistant method') + $notes) -join '; ' }
-    }
     if ($Finding.PhoneOnly) {
         return @{ Level = 'High'; Notes = (@("SMS/voice is the only MFA method (retires $($script:SmsRetirementDate))") + $notes) -join '; ' }
     }
@@ -1355,7 +1346,7 @@ function Find-SmsUsers {
     <#
     .SYNOPSIS
         Orchestrates the hunt and returns one finding object per user with phone MFA registered.
-        Users that cannot be read are included as Unknown, never dropped.
+        Users missing from the report whose methods cannot be read are skipped and counted in the log.
     #>
     [CmdletBinding()]
     param([int]$SignInDays = 0)
@@ -1402,6 +1393,7 @@ function Find-SmsUsers {
 
     $gapUsers = @($directory.Values | Where-Object { -not $reportIds.Contains($_.id) })
     $adminIds = $null
+    $unreadable = 0
     if ($gapUsers.Count -gt 0) {
         Write-Log "$($gapUsers.Count) directory user(s) missing from the registration report. Checking them directly." -Level "WARNING"
         $adminIds = Get-AdminUserIds
@@ -1410,7 +1402,8 @@ function Find-SmsUsers {
             $i++
             Write-Progress -Activity "Checking users missing from the registration report" -Status "$i of $($gapUsers.Count) - $($u.userPrincipalName)" -PercentComplete ([math]::Round($i / $gapUsers.Count * 100))
             $direct = Get-UserMethodsDirect -UserId $u.id
-            if ($direct.Status -eq 'Ok' -and -not (@($direct.Methods) -match $script:PhoneMethodPattern)) { continue }
+            if ($direct.Status -ne 'Ok') { $unreadable++; continue }
+            if (-not (@($direct.Methods) -match $script:PhoneMethodPattern)) { continue }
             $candidates.Add([PSCustomObject]@{
                 Id              = $u.id
                 Upn             = $u.userPrincipalName
@@ -1521,8 +1514,10 @@ function Find-SmsUsers {
     }
     if ($total -gt 0) { Write-Progress -Activity "Reading phone methods" -Completed }
 
-    $unknown = @($rows | Where-Object { $_.DataStatus -ne 'Ok' }).Count
-    Write-Log "Hunt complete: $($rows.Count) user(s) with SMS/voice registered ($unknown unreadable)" -Level "SUCCESS"
+    if ($unreadable -gt 0) {
+        Write-Log "$unreadable user(s) missing from the registration report could not be read (access denied or error) and were skipped" -Level "WARNING"
+    }
+    Write-Log "Hunt complete: $($rows.Count) user(s) with SMS/voice registered" -Level "SUCCESS"
     Write-Log "Note: the registration report can lag behind recent registrations." -Level "INFO"
     return , $rows
 }
@@ -1574,7 +1569,7 @@ function Show-UserConsole {
         return
     }
 
-    $enabled = @($Findings | Where-Object { $_.AccountEnabled -eq $true -and $_.DataStatus -eq 'Ok' })
+    $enabled = @($Findings | Where-Object { $_.AccountEnabled -eq $true })
     Write-Host "  Users with SMS/voice registered:     $($Findings.Count)" -ForegroundColor White
     Write-Host "    Enabled accounts:                  $($enabled.Count)" -ForegroundColor White
     Write-Host "    Admins:                            $(@($enabled | Where-Object IsAdmin).Count)" -ForegroundColor White
@@ -1586,13 +1581,12 @@ function Show-UserConsole {
     if ($script:SignInScanDays -gt 0) {
         Write-Host "    Used SMS/voice (last $($script:SignInScanDays) days):      $(@($enabled | Where-Object { $_.SmsSignInCount -gt 0 }).Count)" -ForegroundColor White
     }
-    Write-Host "  Unreadable (RMAU / error):           $(@($Findings | Where-Object { $_.DataStatus -ne 'Ok' }).Count)" -ForegroundColor Gray
 
     Write-Host ""
     Write-Host "  RISK:" -ForegroundColor Yellow
     foreach ($lvl in @(
-        @{ N = 'Critical'; C = 'Red' }, @{ N = 'High'; C = 'DarkYellow' }, @{ N = 'Medium'; C = 'Yellow' },
-        @{ N = 'Low'; C = 'Cyan' }, @{ N = 'Unknown'; C = 'Magenta' }, @{ N = 'N/A'; C = 'Gray' })) {
+        @{ N = 'High'; C = 'DarkYellow' }, @{ N = 'Medium'; C = 'Yellow' },
+        @{ N = 'Low'; C = 'Cyan' }, @{ N = 'N/A'; C = 'Gray' })) {
         Write-Host ("    {0,-9} {1}" -f $lvl.N, @($Findings | Where-Object { $_.RiskLevel -eq $lvl.N }).Count) -ForegroundColor $lvl.C
     }
 
@@ -1603,13 +1597,12 @@ function Show-UserConsole {
         foreach ($c in $countries) { Write-Host "    $($c.Name): $($c.Count)" }
     }
 
-    $top = @($Findings | Where-Object { $_.RiskLevel -in 'Critical', 'High' } | Sort-Object @{ e = { if ($_.RiskLevel -eq 'Critical') { 0 } else { 1 } } }, UserPrincipalName | Select-Object -First 15)
+    $top = @($Findings | Where-Object { $_.RiskLevel -eq 'High' } | Sort-Object UserPrincipalName | Select-Object -First 15)
     if ($top.Count -gt 0) {
         Write-Host ""
-        Write-Host "  CRITICAL / HIGH (first 15):" -ForegroundColor Yellow
+        Write-Host "  HIGH (first 15):" -ForegroundColor Yellow
         foreach ($u in $top) {
-            $color = if ($u.RiskLevel -eq 'Critical') { 'Red' } else { 'DarkYellow' }
-            Write-Host ("    [{0,-8}] {1} - {2}" -f $u.RiskLevel, $u.UserPrincipalName, $u.RiskNotes) -ForegroundColor $color
+            Write-Host ("    {0} - {1}" -f $u.UserPrincipalName, $u.RiskNotes) -ForegroundColor DarkYellow
         }
     }
 
@@ -1715,7 +1708,7 @@ function New-SmsHtmlReport {
     $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $scanLabel = if ($SignInScanDays -gt 0) { "Sign-in scan: last $SignInScanDays days" } else { 'Sign-in scan: not run' }
 
-    $phoneOnlyCount = @($UserFindings | Where-Object { $_ -and $_.PhoneOnly -and $_.AccountEnabled -eq $true -and $_.DataStatus -eq 'Ok' }).Count
+    $phoneOnlyCount = @($UserFindings | Where-Object { $_ -and $_.PhoneOnly -and $_.AccountEnabled -eq $true }).Count
     $retirementHtml = ''
     if ($phoneOnlyCount -gt 0) {
         $label = if ($phoneOnlyCount -eq 1) { 'account relies' } else { 'accounts rely' }
@@ -1750,11 +1743,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .card { background: white; border-radius: 10px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center; }
 .card .value { font-size: 2em; font-weight: 700; }
 .card .label { font-size: 0.85em; color: #666; margin-top: 5px; }
-.card.critical .value { color: #d32f2f; }
+.card.alert .value { color: #d32f2f; }
 .card.high .value { color: #f57c00; }
 .card.medium .value { color: #fbc02d; }
 .card.low .value { color: #0097a7; }
-.card.unknown .value { color: #8e24aa; }
 .card.info .value { color: #1565c0; }
 .section-title { font-size: 1.1em; font-weight: 700; color: #1a237e; margin-bottom: 12px; }
 .policy-area { border: 1px solid #e8e8e8; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
@@ -1796,18 +1788,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 #smsTable th.sorted-desc .sort-icon::after { content: ' \25BC'; }
 #smsTable td { padding: 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
 #smsTable tr:hover { background: #f5f5f5; }
-tr.risk-critical { border-left: 4px solid #d32f2f; }
 tr.risk-high { border-left: 4px solid #f57c00; }
 tr.risk-medium { border-left: 4px solid #fbc02d; }
 tr.risk-low { border-left: 4px solid #0097a7; }
-tr.risk-unknown { border-left: 4px solid #8e24aa; }
 tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; white-space: nowrap; }
-.badge-critical { background: #ffebee; color: #c62828; }
 .badge-high { background: #fff3e0; color: #e65100; }
 .badge-medium { background: #fffde7; color: #f57f17; }
 .badge-low { background: #e0f7fa; color: #00695c; }
-.badge-unknown { background: #f3e5f5; color: #6a1b9a; }
 .badge-na { background: #f5f5f5; color: #616161; }
 .badge-enabled, .badge-yes { background: #e8f5e9; color: #2e7d32; }
 .badge-disabled { background: #ffebee; color: #c62828; }
@@ -1890,7 +1878,7 @@ $retirementHtml
 <h3>Filters</h3>
 <div class="filter-row">
 <div class="filter-group"><label>Search (Name / UPN / Phone)</label><input type="text" id="searchBox" placeholder="Name, UPN, or phone e.g. +47..."></div>
-<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option><option>Unknown</option><option>N/A</option></select></div>
+<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option>High</option><option>Medium</option><option>Low</option><option>N/A</option></select></div>
 <div class="filter-group"><label>User Type</label><select id="filterType" data-field="userType"><option value="">All</option></select></div>
 <div class="filter-group"><label>Account Status</label><select id="filterStatus" data-field="accountStatus"><option value="">All</option></select></div>
 <div class="filter-group"><label>SMS/Voice Only</label><select id="filterPhoneOnly"><option value="">All</option><option>Yes</option><option>No</option></select></div>
@@ -1948,7 +1936,7 @@ let sortDir = 'asc';
 let activeMethodFilters = [];
 let methodFilterMode = 'or';
 let onlySelectedMethods = false;
-const riskOrder = {Critical:0, High:1, Medium:2, Low:3, Unknown:4, 'N/A':5};
+const riskOrder = {High:0, Medium:1, Low:2, 'N/A':3};
 
 function esc(s) { if (s === null || s === undefined) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
 function key(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
@@ -2111,7 +2099,7 @@ function drawPie(svgId, legendId, segs) {
 }
 
 function renderSummary() {
-    const enabled = DATA.filter(function(r) { return r.accountStatus === 'Enabled' && r.riskLevel !== 'Unknown'; });
+    const enabled = DATA.filter(function(r) { return r.accountStatus === 'Enabled'; });
     const count = function(arr, fn) { return arr.filter(fn).length; };
     const rc = {};
     DATA.forEach(function(r) { rc[r.riskLevel] = (rc[r.riskLevel] || 0) + 1; });
@@ -2120,15 +2108,13 @@ function renderSummary() {
 
     const cards = [
         { v: DATA.length, l: 'Users with SMS/voice', c: 'info' },
-        { v: rc.Critical || 0, l: 'Critical', c: 'critical' },
         { v: rc.High || 0, l: 'High', c: 'high' },
         { v: rc.Medium || 0, l: 'Medium', c: 'medium' },
         { v: rc.Low || 0, l: 'Low', c: 'low' },
-        { v: rc.Unknown || 0, l: 'Unknown (RMAU)', c: 'unknown' },
         { v: count(enabled, function(r) { return r.phoneOnly === 'Yes'; }), l: 'SMS/voice only', c: 'high' },
         { v: count(enabled, function(r) { return r.smsPolicy === 'Yes' || r.voicePolicy === 'Yes'; }), l: 'Allowed by policy', c: 'high' },
-        { v: SCAN_DAYS > 0 ? count(enabled, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Used SMS (' + SCAN_DAYS + 'd)' : 'Used SMS (not scanned)', c: 'critical' },
-        { v: pf.Fail || 0, l: 'Policy: Fail', c: 'critical' },
+        { v: SCAN_DAYS > 0 ? count(enabled, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Used SMS (' + SCAN_DAYS + 'd)' : 'Used SMS (not scanned)', c: 'alert' },
+        { v: pf.Fail || 0, l: 'Policy: Fail', c: 'alert' },
         { v: pf.Warn || 0, l: 'Policy: Warn', c: 'high' }
     ];
     document.getElementById('dashboard').innerHTML = cards.map(function(c) {
@@ -2153,7 +2139,7 @@ function renderSummary() {
         return '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + esc(s.label) + ': <strong>' + s.n + '</strong> (' + pct(s.n) + '%)</span>';
     }).join('');
 
-    const rColors = { Critical: '#d32f2f', High: '#f57c00', Medium: '#fbc02d', Low: '#0097a7', Unknown: '#8e24aa', 'N/A': '#9e9e9e' };
+    const rColors = { High: '#f57c00', Medium: '#fbc02d', Low: '#0097a7', 'N/A': '#9e9e9e' };
     drawPie('riskPie', 'riskPieLegend', Object.keys(rColors).filter(function(k) { return rc[k]; }).map(function(k) { return { l: k, v: rc[k], c: rColors[k] }; }));
 
     const pColors = { Fail: '#d32f2f', Warn: '#f57c00', Pass: '#388e3c', Info: '#1565c0' };

@@ -22,19 +22,16 @@ Interactive menu-driven analysis with console, CSV and HTML output. The HTML rep
   - Registration campaign: state, snooze, enforcement after snoozes, targets and targeted method
   - Passkeys (FIDO2): state, self-service registration, each passkey profile (types, attestation, key restrictions, targeted groups), Temporary Access Pass
 - **Cross-checks**: SMS/voice-only users, users still allowed SMS/voice, leftover registrations blocked by policy, users outside the campaign, users who cannot register a passkey, users who used SMS recently
-- **RMAU aware**: users that cannot be read are reported as Unknown, not dropped
 - **Output**: console summary, semicolon-delimited CSV, self-contained HTML report (auto-opens in Edge)
 
 ## Risk model
 
 | Level | Meaning |
 | --- | --- |
-| **Critical** | Admin with SMS/voice registered and no phishing-resistant method |
 | **High** | SMS/voice is the only MFA method, the effective default method, or was used for MFA in the scanned window |
 | **Medium** | SMS/voice next to Authenticator/OATH, no phishing-resistant method |
 | **Low** | SMS/voice next to a phishing-resistant method (cleanup candidate) |
 | **N/A** | Account disabled |
-| **Unknown** | RMAU protected or unreadable |
 
 Phishing-resistant = passkeys (device-bound, synced, Authenticator, Windows Hello), FIDO2, Windows Hello for Business, platform credential, certificate.
 
