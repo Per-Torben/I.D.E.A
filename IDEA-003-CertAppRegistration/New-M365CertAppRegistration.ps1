@@ -27,7 +27,7 @@
 
     The main menu also offers a second mode: adding Microsoft Graph permissions to an app
     registration that already exists. It uses the same permission menu — including the
-    I.D.E.A. 002, I.D.E.A. 004 and Entra Security Assessment bundles — preserves the
+    I.D.E.A. 002, I.D.E.A. 004, I.D.E.A. 005 and Entra Security Assessment bundles — preserves the
     permissions already on the app, grants admin consent for the missing ones, and verifies
     the result against the tenant.
 
@@ -147,6 +147,14 @@ $script:Idea004Permissions = @(
     'CrossTenantInformation.ReadBasic.All'
 )
 
+$script:Idea005Permissions = @(
+    'User.Read.All'
+    'Directory.Read.All'
+    'UserAuthenticationMethod.Read.All'
+    'AuditLog.Read.All'
+    'Policy.Read.All'
+)
+
 # Source: C:\Scripts\EntraSecurityAssesment\readme.md, section 2.1
 $script:EntraSecurityAssessmentPermissions = @(
     'Directory.Read.All'
@@ -191,6 +199,13 @@ $script:ServiceDefinitions = @{
                 Default     = $false
                 Type        = 'Application'
                 Permissions = $script:Idea004Permissions
+            }
+            @{
+                Name        = 'IDEA-005 — SMS MFA Hunter'
+                Description = 'Scopes required by Get-SmsMfaReport.ps1'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:Idea005Permissions
             }
             @{
                 Name        = 'Entra Security Assessment'
@@ -1134,7 +1149,7 @@ function Add-PermissionToExistingApp {
         Adds Microsoft Graph application permissions to an existing app registration and
         grants admin consent.
     .DESCRIPTION
-        Uses the same permission menu as a new registration, so the IDEA-002, IDEA-004 and
+        Uses the same permission menu as a new registration, so the IDEA-002, IDEA-004, IDEA-005 and
         Entra Security Assessment bundles can be applied to an app that already exists.
         Existing permissions on the app are preserved.
     .OUTPUTS
