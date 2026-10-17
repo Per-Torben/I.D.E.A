@@ -1777,6 +1777,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .method-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: #e3f2fd; border-radius: 16px; font-size: 0.8em; cursor: pointer; user-select: none; border: 1px solid #bbdefb; }
 .method-chip.active { background: #1565c0; color: white; border-color: #1565c0; }
 .btn-reset { padding: 8px 16px; background: #e0e0e0; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
+.key-filter { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: #fff1f0; border: 2px solid #d32f2f; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
+.key-filter .kf-icon { font-size: 1.6em; color: #d32f2f; line-height: 1; }
+.key-filter .kf-text { display: flex; flex-direction: column; }
+.key-filter .kf-title { font-weight: 700; color: #b71c1c; font-size: 1.1em; }
+.key-filter .kf-sub { font-size: 0.8em; color: #5f2120; }
+.key-filter .kf-count { background: #d32f2f; color: #fff; border-radius: 16px; padding: 4px 14px; font-weight: 700; font-size: 1.1em; }
+.key-filter select { padding: 8px 12px; border: 2px solid #d32f2f; border-radius: 6px; font-weight: 700; font-size: 0.95em; min-width: 110px; }
+.key-filter .kf-btn { padding: 9px 16px; background: #d32f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 0.9em; }
+.key-filter .kf-btn:hover { background: #b71c1c; }
+.key-filter.active { background: #d32f2f; }
+.key-filter.active .kf-title, .key-filter.active .kf-sub, .key-filter.active .kf-icon { color: #fff; }
+.key-filter.active .kf-count { background: #fff; color: #d32f2f; }
+.key-filter.active .kf-btn { background: #fff; color: #d32f2f; }
+.key-filter.disabled { background: #f5f5f5; border-color: #bdbdbd; }
+.key-filter.disabled .kf-title, .key-filter.disabled .kf-icon { color: #757575; }
+.key-filter.disabled .kf-count, .key-filter.disabled .kf-btn { background: #bdbdbd; cursor: not-allowed; }
+.card.clickable { cursor: pointer; outline: 2px solid #d32f2f; }
+.card.clickable:hover { background: #fff1f0; }
 .btn-reset:hover { background: #bdbdbd; }
 .table-container { background: white; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; }
 .table-info { padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #eee; font-size: 0.85em; color: #666; }
@@ -1876,6 +1894,13 @@ $retirementHtml
 
 <div class="filters">
 <h3>Filters</h3>
+<div class="key-filter" id="keyFilter">
+<span class="kf-icon">&#9888;</span>
+<div class="kf-text"><span class="kf-title">Has signed in with SMS</span><span class="kf-sub" id="kfSub"></span></div>
+<span class="kf-count" id="kfCount">0</span>
+<select id="filterUsed" title="Has signed in with SMS"><option value="">All</option><option value="Yes">Yes</option><option value="No">No</option></select>
+<button class="kf-btn" id="kfBtn" onclick="showSmsSignIns()">Show only these users</button>
+</div>
 <div class="filter-row">
 <div class="filter-group"><label>Search (Name / UPN / Phone)</label><input type="text" id="searchBox" placeholder="Name, UPN, or phone e.g. +47..."></div>
 <div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option>High</option><option>Medium</option><option>Low</option><option>N/A</option></select></div>
@@ -1885,7 +1910,6 @@ $retirementHtml
 <div class="filter-group"><label>SMS Policy</label><select id="filterSmsPolicy" data-field="smsPolicy"><option value="">All</option></select></div>
 <div class="filter-group"><label>Passkey Policy</label><select id="filterPasskey" data-field="passkeyPolicy"><option value="">All</option></select></div>
 <div class="filter-group"><label>Campaign Scope</label><select id="filterCampaign" data-field="campaign"><option value="">All</option></select></div>
-<div class="filter-group"><label>Has signed in with SMS</label><select id="filterUsed"><option value="">All</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
 <div class="filter-group"><button class="btn-reset" onclick="resetFilters()">Reset All</button></div>
 </div>
 <div class="method-filters" id="methodFilters">
@@ -1956,7 +1980,23 @@ function fillSelects() {
     document.getElementById('methodChips').innerHTML = tags.map(function(t) {
         return '<span class="method-chip" data-method="' + esc(t) + '" onclick="toggleMethod(this)">' + esc(t) + '</span> ';
     }).join('');
-    if (SCAN_DAYS === 0) { document.getElementById('filterUsed').disabled = true; }
+    const used = DATA.filter(function(r) { return r.smsUseCount > 0; }).length;
+    document.getElementById('kfCount').textContent = SCAN_DAYS > 0 ? used + (used === 1 ? ' user' : ' users') : 'not scanned';
+    document.getElementById('kfSub').textContent = SCAN_DAYS > 0
+        ? 'Completed MFA with SMS/voice in the last ' + SCAN_DAYS + ' days (sign-in logs). These users actively depend on SMS.'
+        : 'Sign-in log scan was not run. Re-run the hunt with a scan window to find active SMS users.';
+    if (SCAN_DAYS === 0) {
+        document.getElementById('filterUsed').disabled = true;
+        document.getElementById('kfBtn').disabled = true;
+        document.getElementById('keyFilter').classList.add('disabled');
+    }
+}
+
+function showSmsSignIns() {
+    if (SCAN_DAYS === 0) return;
+    document.getElementById('filterUsed').value = 'Yes';
+    renderTable();
+    document.getElementById('keyFilter').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function renderTable() {
@@ -1997,6 +2037,7 @@ function renderTable() {
     });
 
     document.getElementById('visibleCount').textContent = filtered.length;
+    document.getElementById('keyFilter').classList.toggle('active', fUsed === 'Yes');
     document.getElementById('totalCount').textContent = DATA.length;
 
     document.getElementById('tableBody').innerHTML = filtered.map(function(r) {
@@ -2113,12 +2154,12 @@ function renderSummary() {
         { v: rc.Low || 0, l: 'Low', c: 'low' },
         { v: count(enabled, function(r) { return r.phoneOnly === 'Yes'; }), l: 'SMS/voice only', c: 'high' },
         { v: count(enabled, function(r) { return r.smsPolicy === 'Yes' || r.voicePolicy === 'Yes'; }), l: 'Allowed by policy', c: 'high' },
-        { v: SCAN_DAYS > 0 ? count(enabled, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Used SMS (' + SCAN_DAYS + 'd)' : 'Used SMS (not scanned)', c: 'alert' },
+        { v: SCAN_DAYS > 0 ? count(DATA, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Signed in with SMS (' + SCAN_DAYS + 'd)' : 'Signed in with SMS (not scanned)', c: SCAN_DAYS > 0 ? 'alert clickable' : 'alert', click: SCAN_DAYS > 0 },
         { v: pf.Fail || 0, l: 'Policy: Fail', c: 'alert' },
         { v: pf.Warn || 0, l: 'Policy: Warn', c: 'high' }
     ];
     document.getElementById('dashboard').innerHTML = cards.map(function(c) {
-        return '<div class="card ' + c.c + '"><div class="value">' + c.v + '</div><div class="label">' + esc(c.l) + '</div></div>';
+        return '<div class="card ' + c.c + '"' + (c.click ? ' onclick="showSmsSignIns()" title="Show only these users"' : '') + '><div class="value">' + c.v + '</div><div class="label">' + esc(c.l) + '</div></div>';
     }).join('');
 
     const total = enabled.length;
