@@ -21,6 +21,7 @@ Interactive menu-driven analysis with console, CSV and HTML output. The HTML rep
   - SMS and Voice: state, targets, SMS sign-in (passwordless SMS), office phone
   - Registration campaign: state, snooze, enforcement after snoozes, targets and targeted method
   - Passkeys (FIDO2): state, self-service registration, each passkey profile (types, attestation, key restrictions, targeted groups), Temporary Access Pass
+  - Warns when the default passkey profile is unchanged (synced allowed, no attestation, no key restrictions), and for any profile that allows synced passkeys without AAGUID restrictions
 - **Cross-checks**: SMS/voice-only users, users still allowed SMS/voice, leftover registrations blocked by policy, users outside the campaign, users who cannot register a passkey, users who used SMS recently
 - **Output**: console summary, semicolon-delimited CSV, self-contained HTML report (auto-opens in Edge)
 

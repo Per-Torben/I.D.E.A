@@ -1031,11 +1031,25 @@ function Get-PasskeyProfileFindings {
             }
             if (-not $targets) { $targets = '(no targets)' }
 
-            $pStatus = if ($targets -eq '(no targets)' -and -not $isDefault) { 'Warn' } else { 'Info' }
+            $allowsSynced = ("$($p.passkeyTypes)" -split ',\s*') -contains 'synced'
+            $aaguidRestricted = [bool]($kr -and $kr.isEnforced -and @($kr.aaGuids | Where-Object { $_ }).Count -gt 0)
+            $isOutOfBoxDefault = $isDefault -and $allowsSynced -and "$($p.attestationEnforcement)" -eq 'disabled' -and -not $aaguidRestricted
+
+            $warnings = @()
+            if ($isOutOfBoxDefault) {
+                $warnings += 'Default passkey profile is unchanged: synced passkeys from any provider can be registered without attestation or AAGUID restrictions.'
+            }
+            elseif ($allowsSynced -and -not $aaguidRestricted) {
+                $warnings += 'Allows synced passkeys without AAGUID restrictions: any passkey provider can be used.'
+            }
+            if ($targets -eq '(no targets)' -and -not $isDefault) { $warnings += 'Profile is not assigned to any target.' }
+
+            $pStatus = if ($warnings.Count -gt 0) { 'Warn' } else { 'Info' }
             $label = if ($isDefault) { "Profile: $($p.name) (default)" } else { "Profile: $($p.name)" }
+            $recommended = if ($allowsSynced -and -not $aaguidRestricted) { 'Restrict AAGUIDs (allow list) or limit to device-bound passkeys' } else { '' }
             $findings += New-PolicyFinding -Area $area -Check $label -Status $pStatus `
                 -Current "types: $($p.passkeyTypes); attestation: $($p.attestationEnforcement); key restrictions: $krText; targets: $targets" `
-                -Notes $(if ($pStatus -eq 'Warn') { 'Profile is not assigned to any target.' } else { '' })
+                -Recommended $recommended -Notes ($warnings -join ' ')
         }
     }
 
