@@ -29,14 +29,14 @@ Interactive menu-driven analysis with console, CSV and HTML output. The HTML rep
 
 | Level | Meaning |
 | --- | --- |
-| **High** | SMS/voice is the only MFA method, the effective default method, or was used for MFA in the scanned window |
-| **Medium** | SMS/voice next to Authenticator/OATH, no phishing-resistant method |
-| **Low** | SMS/voice next to a phishing-resistant method (cleanup candidate) |
+| **High** | SMS/voice only |
+| **Medium** | SMS/voice + other MFA, no phishing-resistant |
+| **Low** | SMS/voice + phishing-resistant (cleanup) |
 | **N/A** | Account disabled |
 
 Phishing-resistant = passkeys (device-bound, synced, Authenticator, Windows Hello), FIDO2, Windows Hello for Business, platform credential, certificate.
 
-Policy targeting, campaign scope, passkey policy scope and SMS sign-in state are separate columns, not part of the level.
+Risk is the fallback category only, with the same wording in the console, CSV and every part of the HTML report. SMS sign-ins in the scanned window, SMS as default method, SMS sign-in state, policy targeting, campaign scope and passkey policy scope are separate columns and never change the level.
 
 ## Prerequisites
 - PowerShell 7.0+
@@ -110,11 +110,10 @@ The hunt asks how many days of sign-in logs to scan (default 7, 0 to skip). The 
 
 ## HTML Report
 - Retirement notice when SMS/voice-only users exist
-- Dashboard cards: risk levels, SMS/voice-only, allowed by policy, used SMS, policy Fail/Warn counts
-- Fallback bar: SMS/voice only vs. other MFA vs. phishing-resistant
-- Pie charts: risk, policy posture, phone numbers by country
-- Policy posture grouped by area, collapsible, with Pass/Warn/Fail/Info badges
-- User table: sorting, text search (name/UPN/phone), filters for risk, type, account, SMS/voice only, SMS policy, passkey policy, campaign scope, SMS use
+- **Part 1 - Policy posture** (tenant configuration): Fail/Warn/Pass/Info cards, findings-by-status pie, findings grouped by area (collapsible)
+- **Part 2 - SMS/voice users**: cross-checks (users compared with policy), risk cards, fallback bar and risk pie (identical counts and labels), phone numbers by country
+- Red "Has signed in with SMS" key filter with count and one-click button; the matching dashboard card is clickable
+- User table: sorting, text search (name/UPN/phone), filters for risk (fallback category), type, account, SMS policy, passkey policy, campaign scope; SMS Uses, SMS Default and Fallback Category columns
 - Method chip filters built from the data, with AND/OR and "only selected methods"
 - Users found by direct lookup or the sign-in scan (missing from the registration report's phone set) are marked with `*`
 

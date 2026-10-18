@@ -102,6 +102,14 @@ $script:GroupNameCache   = @{}
 $script:GroupMemberCache = @{}
 
 $script:SmsRetirementDate = '2027-02-01'
+
+# Risk = fallback category. Same wording in console, CSV, HTML bar, cards, pie, filter and table.
+$script:RiskLabels = [ordered]@{
+    'High'   = 'SMS/voice only'
+    'Medium' = 'SMS/voice + other MFA, no phishing-resistant'
+    'Low'    = 'SMS/voice + phishing-resistant (cleanup)'
+    'N/A'    = 'Account disabled'
+}
 $script:SmsRetirementUrl  = 'https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement#5-after-retirement'
 
 # methodsRegistered values seen live: mobilePhone, passKeyDeviceBound*, passKeySynced, ...
@@ -1329,38 +1337,23 @@ function Get-SmsSignInUsage {
 function Get-SmsRiskLevel {
     <#
     .SYNOPSIS
-        Scores one user. Returns @{ Level; Notes }.
+        Scores one user by fallback category only. Returns @{ Level; Notes }.
     .NOTES
-        N/A      : Account disabled.
-        High     : SMS/voice is the ONLY MFA method, the effective default method, or was used
-                   for MFA in the scanned sign-in window.
-        Medium   : SMS/voice next to Authenticator/OATH, no phishing-resistant method.
-        Low      : SMS/voice next to a phishing-resistant method (cleanup candidate).
+        Labels come from $script:RiskLabels so console, CSV and HTML use the same wording.
+        SMS sign-ins, SMS as default method and SMS sign-in readiness are separate columns
+        and never change the level.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][PSCustomObject]$Finding)
 
-    if ($Finding.AccountEnabled -ne $true) {
-        return @{ Level = 'N/A'; Notes = 'Account disabled' }
-    }
+    $level = if ($Finding.AccountEnabled -ne $true) { 'N/A' }
+             elseif ($Finding.PhoneOnly) { 'High' }
+             elseif (-not $Finding.HasPhishingResistant) { 'Medium' }
+             else { 'Low' }
 
-    $notes = @()
-    if ($Finding.SmsSignInCount -gt 0) { $notes += "Used SMS/voice for MFA $($Finding.SmsSignInCount)x recently" }
-    if ("$($Finding.SmsSignInState)" -match '(^|,\s*)ready') { $notes += 'SMS sign-in ready' }
-
-    if ($Finding.PhoneOnly) {
-        return @{ Level = 'High'; Notes = (@("SMS/voice is the only MFA method (retires $($script:SmsRetirementDate))") + $notes) -join '; ' }
-    }
-    if ("$($Finding.EffectiveMfaMethod)" -match $script:PhonePreferredPattern) {
-        return @{ Level = 'High'; Notes = (@("SMS/voice is the default MFA method ($($Finding.EffectiveMfaMethod))") + $notes) -join '; ' }
-    }
-    if ($Finding.SmsSignInCount -gt 0) {
-        return @{ Level = 'High'; Notes = $notes -join '; ' }
-    }
-    if (-not $Finding.HasPhishingResistant) {
-        return @{ Level = 'Medium'; Notes = (@('SMS/voice next to other MFA, no phishing-resistant method') + $notes) -join '; ' }
-    }
-    return @{ Level = 'Low'; Notes = (@('Has phishing-resistant method; remove SMS/voice') + $notes) -join '; ' }
+    $notes = $script:RiskLabels[$level]
+    if ($level -eq 'High') { $notes += " (retires $($script:SmsRetirementDate))" }
+    return @{ Level = $level; Notes = $notes }
 }
 
 function Find-SmsUsers {
@@ -1511,6 +1504,7 @@ function Find-SmsUsers {
             PreferredMfaMethod    = $c.Preferred
             SystemPreferredMethod = $c.SystemPreferred
             EffectiveMfaMethod    = $c.Effective
+            SmsIsDefaultMethod    = ("$($c.Effective)" -match $script:PhonePreferredPattern)
             OtherMethods          = (@($otherMethods | ForEach-Object { Get-MethodDisplayName $_ }) -join ', ')
             MethodsRegistered     = (@($c.Methods) -join ', ')
             PhoneOnly             = ($mfaAlternatives.Count -eq 0)
@@ -1525,12 +1519,12 @@ function Find-SmsUsers {
             DataSource            = $c.Source
             DataStatus            = $detail.Status
             RiskLevel             = ''
-            RiskNotes             = ''
+            RiskCategory          = ''
         }
 
         $risk = Get-SmsRiskLevel -Finding $row
         $row.RiskLevel = $risk.Level
-        $row.RiskNotes = $risk.Notes
+        $row.RiskCategory = $risk.Notes
         $rows.Add($row)
     }
     if ($total -gt 0) { Write-Progress -Activity "Reading phone methods" -Completed }
@@ -1591,25 +1585,28 @@ function Show-UserConsole {
     }
 
     $enabled = @($Findings | Where-Object { $_.AccountEnabled -eq $true })
-    Write-Host "  Users with SMS/voice registered:     $($Findings.Count)" -ForegroundColor White
-    Write-Host "    Enabled accounts:                  $($enabled.Count)" -ForegroundColor White
-    Write-Host "    Admins:                            $(@($enabled | Where-Object IsAdmin).Count)" -ForegroundColor White
-    Write-Host "    SMS/voice is only MFA method:      $(@($enabled | Where-Object PhoneOnly).Count)" -ForegroundColor White
-    Write-Host "    SMS/voice is default method:       $(@($enabled | Where-Object { "$($_.EffectiveMfaMethod)" -match $script:PhonePreferredPattern }).Count)" -ForegroundColor White
-    Write-Host "    No phishing-resistant method:      $(@($enabled | Where-Object { -not $_.HasPhishingResistant }).Count)" -ForegroundColor White
-    Write-Host "    SMS sign-in ready:                 $(@($enabled | Where-Object { "$($_.SmsSignInState)" -match '(^|,\s*)ready' }).Count)" -ForegroundColor White
-    Write-Host "    Allowed SMS/voice by policy:       $(@($enabled | Where-Object { $_.SmsPolicyTargeted -eq 'Yes' -or $_.VoicePolicyTargeted -eq 'Yes' }).Count)" -ForegroundColor White
-    if ($script:SignInScanDays -gt 0) {
-        Write-Host "    Used SMS/voice (last $($script:SignInScanDays) days):      $(@($enabled | Where-Object { $_.SmsSignInCount -gt 0 }).Count)" -ForegroundColor White
+    Write-Host "  Users with SMS/voice registered:     $($Findings.Count) ($($enabled.Count) enabled)" -ForegroundColor White
+
+    Write-Host ""
+    Write-Host "  RISK (fallback category):" -ForegroundColor Yellow
+    $colors = @{ 'High' = 'Red'; 'Medium' = 'Yellow'; 'Low' = 'Cyan'; 'N/A' = 'Gray' }
+    foreach ($lvl in $script:RiskLabels.Keys) {
+        $n = @($Findings | Where-Object { $_.RiskLevel -eq $lvl }).Count
+        Write-Host ("    {0,-7} {1,4}  {2}" -f $lvl, $n, $script:RiskLabels[$lvl]) -ForegroundColor $colors[$lvl]
     }
 
     Write-Host ""
-    Write-Host "  RISK:" -ForegroundColor Yellow
-    foreach ($lvl in @(
-        @{ N = 'High'; C = 'DarkYellow' }, @{ N = 'Medium'; C = 'Yellow' },
-        @{ N = 'Low'; C = 'Cyan' }, @{ N = 'N/A'; C = 'Gray' })) {
-        Write-Host ("    {0,-9} {1}" -f $lvl.N, @($Findings | Where-Object { $_.RiskLevel -eq $lvl.N }).Count) -ForegroundColor $lvl.C
+    Write-Host "  SMS USAGE FLAGS (enabled accounts, do not change the risk):" -ForegroundColor Yellow
+    if ($script:SignInScanDays -gt 0) {
+        Write-Host "    Signed in with SMS (last $($script:SignInScanDays) days): $(@($enabled | Where-Object { $_.SmsSignInCount -gt 0 }).Count)" -ForegroundColor Red
     }
+    else {
+        Write-Host "    Signed in with SMS:                not scanned" -ForegroundColor Gray
+    }
+    Write-Host "    SMS/voice is default method:       $(@($enabled | Where-Object SmsIsDefaultMethod).Count)" -ForegroundColor White
+    Write-Host "    SMS sign-in ready:                 $(@($enabled | Where-Object { "$($_.SmsSignInState)" -match '(^|,\s*)ready' }).Count)" -ForegroundColor White
+    Write-Host "    Allowed SMS/voice by policy:       $(@($enabled | Where-Object { $_.SmsPolicyTargeted -eq 'Yes' -or $_.VoicePolicyTargeted -eq 'Yes' }).Count)" -ForegroundColor White
+    Write-Host "    Admins:                            $(@($enabled | Where-Object IsAdmin).Count)" -ForegroundColor White
 
     $countries = $Findings | Where-Object { $_.PhoneCountry } | ForEach-Object { $_.PhoneCountry -split ',\s*' } | Group-Object | Sort-Object Count -Descending
     if ($countries) {
@@ -1621,9 +1618,19 @@ function Show-UserConsole {
     $top = @($Findings | Where-Object { $_.RiskLevel -eq 'High' } | Sort-Object UserPrincipalName | Select-Object -First 15)
     if ($top.Count -gt 0) {
         Write-Host ""
-        Write-Host "  HIGH (first 15):" -ForegroundColor Yellow
+        Write-Host "  HIGH - $($script:RiskLabels['High']) (first 15):" -ForegroundColor Yellow
         foreach ($u in $top) {
-            Write-Host ("    {0} - {1}" -f $u.UserPrincipalName, $u.RiskNotes) -ForegroundColor DarkYellow
+            $used = if ($u.SmsSignInCount -gt 0) { "  [signed in with SMS $($u.SmsSignInCount)x]" } else { '' }
+            Write-Host ("    {0}{1}" -f $u.UserPrincipalName, $used) -ForegroundColor Red
+        }
+    }
+
+    $smsUsers = @($Findings | Where-Object { $_.SmsSignInCount -gt 0 } | Sort-Object UserPrincipalName)
+    if ($smsUsers.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  SIGNED IN WITH SMS (last $($script:SignInScanDays) days):" -ForegroundColor Yellow
+        foreach ($u in $smsUsers) {
+            Write-Host ("    {0} - {1}x, last {2} - {3}" -f $u.UserPrincipalName, $u.SmsSignInCount, $u.LastSmsSignIn, $u.RiskLevel) -ForegroundColor Red
         }
     }
 
@@ -1710,12 +1717,13 @@ function New-SmsHtmlReport {
             voicePolicy      = "$($_.VoicePolicyTargeted)"
             campaign         = "$($_.InCampaignScope)"
             passkeyPolicy    = "$($_.PasskeyPolicyTargeted)"
+            smsIsDefault     = if ($_.SmsIsDefaultMethod) { 'Yes' } else { 'No' }
             smsUseCount      = [int]$_.SmsSignInCount
             lastSmsUse       = "$($_.LastSmsSignIn)"
             lastSignIn       = if ($_.LastSignIn) { "$($_.LastSignIn)" } else { 'Never' }
             dataSource       = "$($_.DataSource)"
             riskLevel        = "$($_.RiskLevel)"
-            riskNotes        = "$($_.RiskNotes)"
+            riskCategory     = "$($_.RiskCategory)"
         }
     })
 
@@ -1725,6 +1733,7 @@ function New-SmsHtmlReport {
 
     $userJson   = ConvertTo-EmbeddedJson -Rows $userRows
     $policyJson = ConvertTo-EmbeddedJson -Rows $policyRows
+    $riskLabelsJson = ($script:RiskLabels | ConvertTo-Json -Compress) -replace '</', '<\/'
     $safeTenant = [System.Net.WebUtility]::HtmlEncode($TenantName)
     $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $scanLabel = if ($SignInScanDays -gt 0) { "Sign-in scan: last $SignInScanDays days" } else { 'Sign-in scan: not run' }
@@ -1765,10 +1774,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .card .value { font-size: 2em; font-weight: 700; }
 .card .label { font-size: 0.85em; color: #666; margin-top: 5px; }
 .card.alert .value { color: #d32f2f; }
-.card.high .value { color: #f57c00; }
-.card.medium .value { color: #fbc02d; }
-.card.low .value { color: #0097a7; }
+.card.high .value { color: #d32f2f; }
+.card.medium .value { color: #f9a825; }
+.card.low .value { color: #388e3c; }
+.card.warn .value { color: #f57c00; }
+.card.pass .value { color: #388e3c; }
 .card.info .value { color: #1565c0; }
+.part-title { font-size: 1.4em; font-weight: 700; color: #1a237e; margin: 30px 0 4px; padding-bottom: 6px; border-bottom: 3px solid #1a237e; }
+.part-sub { font-size: 0.85em; color: #666; margin-bottom: 16px; }
 .section-title { font-size: 1.1em; font-weight: 700; color: #1a237e; margin-bottom: 12px; }
 .policy-area { border: 1px solid #e8e8e8; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
 .policy-area-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f8f9fa; cursor: pointer; font-weight: 600; color: #1a237e; user-select: none; }
@@ -1827,14 +1840,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 #smsTable th.sorted-desc .sort-icon::after { content: ' \25BC'; }
 #smsTable td { padding: 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
 #smsTable tr:hover { background: #f5f5f5; }
-tr.risk-high { border-left: 4px solid #f57c00; }
-tr.risk-medium { border-left: 4px solid #fbc02d; }
-tr.risk-low { border-left: 4px solid #0097a7; }
+tr.risk-high { border-left: 4px solid #d32f2f; }
+tr.risk-medium { border-left: 4px solid #f9a825; }
+tr.risk-low { border-left: 4px solid #388e3c; }
 tr.risk-na { border-left: 4px solid #9e9e9e; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; white-space: nowrap; }
-.badge-high { background: #fff3e0; color: #e65100; }
+.badge-high { background: #ffebee; color: #c62828; }
 .badge-medium { background: #fffde7; color: #f57f17; }
-.badge-low { background: #e0f7fa; color: #00695c; }
+.badge-low { background: #e8f5e9; color: #2e7d32; }
 .badge-na { background: #f5f5f5; color: #616161; }
 .badge-enabled, .badge-yes { background: #e8f5e9; color: #2e7d32; }
 .badge-disabled { background: #ffebee; color: #c62828; }
@@ -1858,7 +1871,7 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 .mfa-bar-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.8em; color: #444; }
 .mfa-bar-legend-item { display: flex; align-items: center; gap: 5px; }
 .mfa-bar-legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
-.pie-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+.pie-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .pie-box-title { font-size: 0.9em; font-weight: 700; color: #1a237e; margin-bottom: 10px; }
 .pie-box-inner { display: flex; align-items: center; gap: 16px; }
 .pie-legend { display: flex; flex-direction: column; gap: 5px; }
@@ -1883,7 +1896,34 @@ tr.risk-na { border-left: 4px solid #9e9e9e; }
 
 $retirementHtml
 
-<div class="dashboard" id="dashboard"></div>
+<div class="part-title">1. Policy posture</div>
+<div class="part-sub">Tenant configuration: authentication methods policy, SMS/voice, registration campaign and passkeys.</div>
+
+<div class="dashboard" id="policyCards"></div>
+
+<div class="summary-block">
+  <div class="pie-row">
+    <div>
+      <div class="pie-box-title">Policy findings by status</div>
+      <div class="pie-box-inner"><svg id="policyPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg><div class="pie-legend" id="policyPieLegend"></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="summary-block">
+  <div class="section-title">Policy findings</div>
+  <div id="policyBody"></div>
+</div>
+
+<div class="part-title">2. SMS/voice users</div>
+<div class="part-sub">Users with SMS or voice call registered. Risk is the fallback category: what the user has besides SMS/voice.</div>
+
+<div class="summary-block">
+  <div class="section-title">Cross-checks (users compared with policy)</div>
+  <div id="crossBody"></div>
+</div>
+
+<div class="dashboard" id="userCards"></div>
 
 <div class="summary-block" id="summaryBlock">
   <div id="barLabel" class="pie-box-title"></div>
@@ -1894,23 +1934,14 @@ $retirementHtml
 <div class="summary-block">
   <div class="pie-row">
     <div>
-      <div class="pie-box-title">Risk Summary</div>
+      <div class="pie-box-title">Risk (fallback category)</div>
       <div class="pie-box-inner"><svg id="riskPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg><div class="pie-legend" id="riskPieLegend"></div></div>
-    </div>
-    <div>
-      <div class="pie-box-title">Policy Posture</div>
-      <div class="pie-box-inner"><svg id="policyPie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg><div class="pie-legend" id="policyPieLegend"></div></div>
     </div>
     <div>
       <div class="pie-box-title">Phone Numbers by Country</div>
       <div class="pie-box-inner"><svg id="phonePie" width="90" height="90" viewBox="-1 -1 2 2" style="flex-shrink:0"></svg><div class="pie-legend" id="phonePieLegend"></div></div>
     </div>
   </div>
-</div>
-
-<div class="summary-block">
-  <div class="section-title">Policy Posture</div>
-  <div id="policyBody"></div>
 </div>
 
 <div class="filters">
@@ -1924,10 +1955,9 @@ $retirementHtml
 </div>
 <div class="filter-row">
 <div class="filter-group"><label>Search (Name / UPN / Phone)</label><input type="text" id="searchBox" placeholder="Name, UPN, or phone e.g. +47..."></div>
-<div class="filter-group"><label>Risk Level</label><select id="filterRisk"><option value="">All</option><option>High</option><option>Medium</option><option>Low</option><option>N/A</option></select></div>
+<div class="filter-group"><label>Risk (fallback category)</label><select id="filterRisk"><option value="">All</option></select></div>
 <div class="filter-group"><label>User Type</label><select id="filterType" data-field="userType"><option value="">All</option></select></div>
 <div class="filter-group"><label>Account Status</label><select id="filterStatus" data-field="accountStatus"><option value="">All</option></select></div>
-<div class="filter-group"><label>SMS/Voice Only</label><select id="filterPhoneOnly"><option value="">All</option><option>Yes</option><option>No</option></select></div>
 <div class="filter-group"><label>SMS Policy</label><select id="filterSmsPolicy" data-field="smsPolicy"><option value="">All</option></select></div>
 <div class="filter-group"><label>Passkey Policy</label><select id="filterPasskey" data-field="passkeyPolicy"><option value="">All</option></select></div>
 <div class="filter-group"><label>Campaign Scope</label><select id="filterCampaign" data-field="campaign"><option value="">All</option></select></div>
@@ -1959,8 +1989,9 @@ $retirementHtml
 <th data-col="passkeyPolicy" onclick="sortTable('passkeyPolicy')">Passkey Policy<span class="sort-icon"></span></th>
 <th data-col="campaign" onclick="sortTable('campaign')">Campaign<span class="sort-icon"></span></th>
 <th data-col="smsUseCount" onclick="sortTable('smsUseCount')">SMS Uses<span class="sort-icon"></span></th>
+<th data-col="smsIsDefault" onclick="sortTable('smsIsDefault')" title="SMS/voice is the effective default MFA method (does not change the risk)">SMS Default<span class="sort-icon"></span></th>
 <th data-col="riskLevel" onclick="sortTable('riskLevel')">Risk<span class="sort-icon"></span></th>
-<th data-col="riskNotes" onclick="sortTable('riskNotes')">Risk Notes<span class="sort-icon"></span></th>
+<th data-col="riskCategory" onclick="sortTable('riskCategory')">Fallback Category<span class="sort-icon"></span></th>
 </tr>
 </thead>
 <tbody id="tableBody"></tbody>
@@ -1975,7 +2006,11 @@ Generated by I.D.E.A. 005 - SMS MFA Hunter | Per-Torben S&oslash;rensen
 <script>
 const DATA = $userJson;
 const POLICY = $policyJson;
+const RISK_LABELS = $riskLabelsJson;
 const SCAN_DAYS = $SignInScanDays;
+const POLICY_CFG = POLICY.filter(function(p) { return p.Area !== 'Cross-checks'; });
+const CROSS = POLICY.filter(function(p) { return p.Area === 'Cross-checks'; });
+const RISK_COLORS = { High: '#d32f2f', Medium: '#f9a825', Low: '#388e3c', 'N/A': '#9e9e9e' };
 let sortCol = 'riskLevel';
 let sortDir = 'asc';
 let activeMethodFilters = [];
@@ -1992,6 +2027,10 @@ function yesBadge(v, warnOnYes) {
 }
 
 function fillSelects() {
+    const riskSel = document.getElementById('filterRisk');
+    Object.keys(RISK_LABELS).forEach(function(k) {
+        const o = document.createElement('option'); o.value = k; o.textContent = k + ' - ' + RISK_LABELS[k]; riskSel.appendChild(o);
+    });
     document.querySelectorAll('select[data-field]').forEach(function(sel) {
         const f = sel.dataset.field;
         const vals = Array.from(new Set(DATA.map(function(r) { return r[f]; }).filter(function(v) { return v; }))).sort();
@@ -2024,7 +2063,7 @@ function renderTable() {
     const search = document.getElementById('searchBox').value.toLowerCase();
     const v = function(id) { return document.getElementById(id).value; };
     const fRisk = v('filterRisk'), fType = v('filterType'), fStatus = v('filterStatus');
-    const fOnly = v('filterPhoneOnly'), fSms = v('filterSmsPolicy'), fCamp = v('filterCampaign'), fPk = v('filterPasskey');
+    const fSms = v('filterSmsPolicy'), fCamp = v('filterCampaign'), fPk = v('filterPasskey');
     const fUsed = v('filterUsed');
 
     let filtered = DATA.filter(function(r) {
@@ -2032,7 +2071,6 @@ function renderTable() {
         if (fRisk && r.riskLevel !== fRisk) return false;
         if (fType && r.userType !== fType) return false;
         if (fStatus && r.accountStatus !== fStatus) return false;
-        if (fOnly && r.phoneOnly !== fOnly) return false;
         if (fSms && r.smsPolicy !== fSms) return false;
         if (fCamp && r.campaign !== fCamp) return false;
         if (fPk && r.passkeyPolicy !== fPk) return false;
@@ -2078,8 +2116,9 @@ function renderTable() {
             '<td>' + yesBadge(r.passkeyPolicy, false) + '</td>' +
             '<td>' + yesBadge(r.campaign, false) + '</td>' +
             '<td>' + uses + '</td>' +
-            '<td><span class="badge badge-' + riskKey(r.riskLevel) + '">' + esc(r.riskLevel) + '</span></td>' +
-            '<td>' + esc(r.riskNotes) + '</td></tr>';
+            '<td>' + yesBadge(r.smsIsDefault, true) + '</td>' +
+            '<td><span class="badge badge-' + riskKey(r.riskLevel) + '" title="' + esc(RISK_LABELS[r.riskLevel]) + '">' + esc(r.riskLevel) + '</span></td>' +
+            '<td>' + esc(r.riskCategory) + '</td></tr>';
     }).join('');
 
     document.querySelectorAll('#smsTable th').forEach(function(th) { th.classList.remove('sorted-asc', 'sorted-desc'); });
@@ -2087,24 +2126,29 @@ function renderTable() {
     if (th) th.classList.add(sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
 }
 
-function renderPolicy() {
-    const host = document.getElementById('policyBody');
-    if (POLICY.length === 0) { host.innerHTML = '<div class="muted">Policy posture was not collected.</div>'; return; }
+function renderFindings(hostId, rows, emptyMsg) {
+    const host = document.getElementById(hostId);
+    if (rows.length === 0) { host.innerHTML = '<div class="muted">' + esc(emptyMsg) + '</div>'; return; }
     const areas = [];
-    POLICY.forEach(function(p) { if (!areas.includes(p.Area)) areas.push(p.Area); });
+    rows.forEach(function(p) { if (!areas.includes(p.Area)) areas.push(p.Area); });
     host.innerHTML = areas.map(function(a) {
-        const rows = POLICY.filter(function(p) { return p.Area === a; });
+        const areaRows = rows.filter(function(p) { return p.Area === a; });
         const counts = {};
-        rows.forEach(function(r) { counts[r.Status] = (counts[r.Status] || 0) + 1; });
+        areaRows.forEach(function(r) { counts[r.Status] = (counts[r.Status] || 0) + 1; });
         const chips = ['Fail', 'Warn', 'Pass', 'Info'].filter(function(s) { return counts[s]; })
             .map(function(s) { return '<span class="badge status-' + key(s) + '">' + counts[s] + ' ' + s + '</span>'; }).join(' ');
         return '<div class="policy-area"><div class="policy-area-header" onclick="toggleSection(this)"><span>' + esc(a) + '</span><span>' + chips + '</span></div>' +
             '<div class="policy-area-body"><table class="policy-table"><thead><tr><th style="width:70px">Status</th><th>Check</th><th>Current</th><th>Recommended</th><th>Notes</th></tr></thead><tbody>' +
-            rows.map(function(r) {
+            areaRows.map(function(r) {
                 return '<tr><td><span class="badge status-' + key(r.Status) + '">' + esc(r.Status) + '</span></td><td>' + esc(r.Check) + '</td><td>' + esc(r.Current) +
                     '</td><td>' + esc(r.Recommended) + '</td><td>' + esc(r.Notes) + '</td></tr>';
             }).join('') + '</tbody></table></div></div>';
     }).join('');
+}
+
+function renderPolicy() {
+    renderFindings('policyBody', POLICY_CFG, 'Policy posture was not collected. Run [2] before exporting.');
+    renderFindings('crossBody', CROSS, 'Cross-checks need the user hunt. Run [3] before exporting.');
 }
 
 function toggleSection(header) { header.classList.toggle('collapsed'); }
@@ -2166,33 +2210,33 @@ function renderSummary() {
     const rc = {};
     DATA.forEach(function(r) { rc[r.riskLevel] = (rc[r.riskLevel] || 0) + 1; });
     const pf = {};
-    POLICY.forEach(function(p) { pf[p.Status] = (pf[p.Status] || 0) + 1; });
-
-    const cards = [
-        { v: DATA.length, l: 'Users with SMS/voice', c: 'info' },
-        { v: rc.High || 0, l: 'High', c: 'high' },
-        { v: rc.Medium || 0, l: 'Medium', c: 'medium' },
-        { v: rc.Low || 0, l: 'Low', c: 'low' },
-        { v: count(enabled, function(r) { return r.phoneOnly === 'Yes'; }), l: 'SMS/voice only', c: 'high' },
-        { v: count(enabled, function(r) { return r.smsPolicy === 'Yes' || r.voicePolicy === 'Yes'; }), l: 'Allowed by policy', c: 'high' },
-        { v: SCAN_DAYS > 0 ? count(DATA, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Signed in with SMS (' + SCAN_DAYS + 'd)' : 'Signed in with SMS (not scanned)', c: SCAN_DAYS > 0 ? 'alert clickable' : 'alert', click: SCAN_DAYS > 0 },
-        { v: pf.Fail || 0, l: 'Policy: Fail', c: 'alert' },
-        { v: pf.Warn || 0, l: 'Policy: Warn', c: 'high' }
-    ];
-    document.getElementById('dashboard').innerHTML = cards.map(function(c) {
+    POLICY_CFG.forEach(function(p) { pf[p.Status] = (pf[p.Status] || 0) + 1; });
+    const card = function(c) {
         return '<div class="card ' + c.c + '"' + (c.click ? ' onclick="showSmsSignIns()" title="Show only these users"' : '') + '><div class="value">' + c.v + '</div><div class="label">' + esc(c.l) + '</div></div>';
-    }).join('');
+    };
 
+    document.getElementById('policyCards').innerHTML = (POLICY_CFG.length === 0 ? [] : [
+        { v: pf.Fail || 0, l: 'Fail', c: 'alert' },
+        { v: pf.Warn || 0, l: 'Warn', c: 'warn' },
+        { v: pf.Pass || 0, l: 'Pass', c: 'pass' },
+        { v: pf.Info || 0, l: 'Info', c: 'info' }
+    ]).map(card).join('');
+
+    document.getElementById('userCards').innerHTML = [
+        { v: DATA.length, l: 'Users with SMS/voice', c: 'info' },
+        { v: rc.High || 0, l: 'High - ' + RISK_LABELS.High, c: 'high' },
+        { v: rc.Medium || 0, l: 'Medium - ' + RISK_LABELS.Medium, c: 'medium' },
+        { v: rc.Low || 0, l: 'Low - ' + RISK_LABELS.Low, c: 'low' },
+        { v: SCAN_DAYS > 0 ? count(DATA, function(r) { return r.smsUseCount > 0; }) : '-', l: SCAN_DAYS > 0 ? 'Signed in with SMS (' + SCAN_DAYS + 'd)' : 'Signed in with SMS (not scanned)', c: SCAN_DAYS > 0 ? 'alert clickable' : 'alert', click: SCAN_DAYS > 0 },
+        { v: count(enabled, function(r) { return r.smsPolicy === 'Yes' || r.voicePolicy === 'Yes'; }), l: 'Allowed SMS/voice by policy', c: 'warn' }
+    ].map(card).join('');
+
+    // Bar segments are the risk levels of enabled accounts, so they always match the risk cards.
     const total = enabled.length;
-    const only = count(enabled, function(r) { return r.phoneOnly === 'Yes'; });
-    const noPhish = count(enabled, function(r) { return r.phoneOnly !== 'Yes' && r.phishResistant !== 'Yes'; });
-    const phish = count(enabled, function(r) { return r.phishResistant === 'Yes'; });
     const pct = function(n) { return total > 0 ? (n / total * 100).toFixed(1) : 0; };
-    const segs = [
-        { n: only, color: '#d32f2f', label: 'SMS/voice only' },
-        { n: noPhish, color: '#fbc02d', label: 'SMS/voice + other MFA, no phishing-resistant' },
-        { n: phish, color: '#388e3c', label: 'SMS/voice + phishing-resistant (cleanup)' }
-    ];
+    const segs = ['High', 'Medium', 'Low'].map(function(k) {
+        return { n: count(enabled, function(r) { return r.riskLevel === k; }), color: RISK_COLORS[k], label: k + ' - ' + RISK_LABELS[k] };
+    });
     document.getElementById('barLabel').textContent = 'Fallback options for enabled SMS/voice users (' + total + ')';
     document.getElementById('mfaBar').innerHTML = segs.filter(function(s) { return s.n > 0; }).map(function(s) {
         return '<div class="mfa-bar-segment" style="width:' + pct(s.n) + '%;background:' + s.color + '" title="' + esc(s.label) + ': ' + s.n + '"></div>';
@@ -2201,8 +2245,7 @@ function renderSummary() {
         return '<span class="mfa-bar-legend-item"><span class="mfa-bar-legend-swatch" style="background:' + s.color + '"></span>' + esc(s.label) + ': <strong>' + s.n + '</strong> (' + pct(s.n) + '%)</span>';
     }).join('');
 
-    const rColors = { High: '#f57c00', Medium: '#fbc02d', Low: '#0097a7', 'N/A': '#9e9e9e' };
-    drawPie('riskPie', 'riskPieLegend', Object.keys(rColors).filter(function(k) { return rc[k]; }).map(function(k) { return { l: k, v: rc[k], c: rColors[k] }; }));
+    drawPie('riskPie', 'riskPieLegend', Object.keys(RISK_LABELS).filter(function(k) { return rc[k]; }).map(function(k) { return { l: k + ' - ' + RISK_LABELS[k], v: rc[k], c: RISK_COLORS[k] }; }));
 
     const pColors = { Fail: '#d32f2f', Warn: '#f57c00', Pass: '#388e3c', Info: '#1565c0' };
     drawPie('policyPie', 'policyPieLegend', Object.keys(pColors).filter(function(k) { return pf[k]; }).map(function(k) { return { l: k, v: pf[k], c: pColors[k] }; }));
