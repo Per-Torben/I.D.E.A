@@ -75,21 +75,20 @@ Connect-MgGraph -TenantId <tenant-id> -ClientId <app-id> -CertificateThumbprint 
 [1] Connect to Microsoft Graph
 [2] Check policy posture (auth methods, SMS/voice, registration campaign, passkeys)
 [3] Hunt SMS/voice MFA users
-[4] Full report (policy + users, CSV/HTML export)
+[4] Export report (HTML/CSV) from the results above
 [C] Clear cached results
 [Q] Quit
 ```
 
-Results from [2] and [3] are cached; [4] asks whether to reuse them. An existing Graph connection (including certificate app-only auth) is reused.
+[2] and [3] collect data and show it in the console. [4] only exports: it writes the HTML and/or CSV from whatever [2] and [3] collected in this session, and does not query Graph for data. Run [2], [3] or both before [4]; [4] is greyed out until then and lists which parts the report will contain. Re-run [2] or [3] to refresh, or [C] to clear. An existing Graph connection (including certificate app-only auth) is reused.
 
 The hunt asks how many days of sign-in logs to scan (default 7, 0 to skip). The scan reads every MFA sign-in in the window, because Graph cannot filter on the authentication method server-side.
 
-### Output Format Selection (after choosing [4])
+### Export Format Selection (after choosing [4])
 ```
-[1] Console only
-[2] Console + CSV
-[3] Console + HTML (default)
-[4] Console + CSV + HTML
+[1] HTML (default)
+[2] CSV
+[3] HTML + CSV
 ```
 
 ## Parameters

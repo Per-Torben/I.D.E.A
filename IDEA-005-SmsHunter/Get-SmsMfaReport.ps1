@@ -90,9 +90,11 @@ foreach ($module in $requiredModules) {
 # Only a connection this script opened is torn down on exit.
 $script:GraphConnectedByScript = $false
 
-# Results kept between menu actions so [4] does not re-query what [2] and [3] already fetched.
+# Results kept between menu actions so [4] can export what [2] and [3] collected.
 $script:PolicyFindings = $null
 $script:UserFindings   = $null
+$script:PolicyCollectedAt = $null
+$script:UserCollectedAt   = $null
 $script:AuthPolicy     = $null
 $script:PolicyScopes   = $null
 $script:SignInScanDays = 0
@@ -345,7 +347,12 @@ function Show-MainMenu {
     Write-Host "  [1] Connect to Microsoft Graph" -ForegroundColor Green
     Write-Host "  [2] Check policy posture (auth methods, SMS/voice, registration campaign, passkeys)" -ForegroundColor Green
     Write-Host "  [3] Hunt SMS/voice MFA users" -ForegroundColor Green
-    Write-Host "  [4] Full report (policy + users, CSV/HTML export)" -ForegroundColor Green
+    if ($script:PolicyFindings -or $null -ne $script:UserFindings) {
+        Write-Host "  [4] Export report (HTML/CSV) from the results above" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  [4] Export report (HTML/CSV) - run [2] and/or [3] first" -ForegroundColor DarkGray
+    }
     Write-Host "  [C] Clear cached results" -ForegroundColor Gray
     Write-Host "  [Q] Quit" -ForegroundColor Gray
     Write-Host ""
@@ -353,23 +360,21 @@ function Show-MainMenu {
 
 function Show-OutputMenu {
     Write-Host ""
-    Write-Host "  Select output format(s):" -ForegroundColor Yellow
-    Write-Host "  [1] Console only" -ForegroundColor Green
-    Write-Host "  [2] Console + CSV" -ForegroundColor Green
-    Write-Host "  [3] Console + HTML (default)" -ForegroundColor Green
-    Write-Host "  [4] Console + CSV + HTML" -ForegroundColor Green
+    Write-Host "  Select export format:" -ForegroundColor Yellow
+    Write-Host "  [1] HTML (default)" -ForegroundColor Green
+    Write-Host "  [2] CSV" -ForegroundColor Green
+    Write-Host "  [3] HTML + CSV" -ForegroundColor Green
     Write-Host ""
 
-    $choice = Read-Host "  Enter choice (1-4, default=3)"
-    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "3" }
+    $choice = Read-Host "  Enter choice (1-3, default=1)"
+    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
 
     switch ($choice) {
-        '1' { return @{ Html = $false; Csv = $false } }
+        '1' { return @{ Html = $true;  Csv = $false } }
         '2' { return @{ Html = $false; Csv = $true } }
-        '3' { return @{ Html = $true;  Csv = $false } }
-        '4' { return @{ Html = $true;  Csv = $true } }
+        '3' { return @{ Html = $true;  Csv = $true } }
         default {
-            Write-Host "  Invalid choice, using default (Console + HTML)" -ForegroundColor Yellow
+            Write-Host "  Invalid choice, using default (HTML)" -ForegroundColor Yellow
             return @{ Html = $true; Csv = $false }
         }
     }
@@ -393,6 +398,8 @@ function Read-SignInScanDays {
 function Clear-ResultCache {
     $script:PolicyFindings   = $null
     $script:UserFindings     = $null
+    $script:PolicyCollectedAt = $null
+    $script:UserCollectedAt   = $null
     $script:AuthPolicy       = $null
     $script:PolicyScopes     = $null
     $script:SignInScanDays   = 0
@@ -2271,6 +2278,7 @@ function Invoke-PolicyCheck {
     $findings += @(Get-PasskeyProfileFindings -Policy $policy)
 
     $script:PolicyFindings = $findings
+    $script:PolicyCollectedAt = Get-Date
     Write-Log "Policy posture check complete: $($findings.Count) findings" -Level "SUCCESS"
     if (-not $Quiet) {
         Show-PolicyConsole -Findings $findings
@@ -2295,6 +2303,7 @@ function Invoke-SmsHunt {
     }
 
     $script:UserFindings = @($findings)
+    $script:UserCollectedAt = Get-Date
     if (-not $Quiet) {
         Show-UserConsole -Findings $script:UserFindings
         Show-PolicyConsole -Findings (Get-CrossCheckFindings -Users $script:UserFindings) -Title 'CROSS-CHECKS'
@@ -2302,30 +2311,36 @@ function Invoke-SmsHunt {
     return $script:UserFindings
 }
 
-function Invoke-FullReport {
-    if (-not (Test-GraphReady)) { return }
+function Invoke-ExportReport {
+    $policy = $script:PolicyFindings
+    $users  = $script:UserFindings
 
-    if ($script:PolicyFindings -or $null -ne $script:UserFindings) {
-        $reuse = Read-Host "  Reuse cached results from this session? (Y/N, default=Y)"
-        if ($reuse -match '^[Nn]') { Clear-ResultCache }
+    if (-not $policy -and $null -eq $users) {
+        Write-Host ""
+        Write-Host "  [X] Nothing to export yet." -ForegroundColor Red
+        Write-Host "      Run [2] Check policy posture and/or [3] Hunt SMS/voice MFA users first." -ForegroundColor Yellow
+        Write-Host ""
+        return
     }
+
+    Write-Host ""
+    Write-Host "  [i] Export uses the cached results from this session. No new data is collected." -ForegroundColor Cyan
+    Write-Host "      To refresh, re-run [2] and/or [3] from the main menu (or [C] to clear the cache)." -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  The report will contain:" -ForegroundColor Yellow
+    if ($policy) { Write-Host "    [OK] Policy posture ($(@($policy).Count) findings, collected $($script:PolicyCollectedAt.ToString('yyyy-MM-dd HH:mm')))" -ForegroundColor Green }
+    else         { Write-Host "    [ ]  Policy posture - not collected, run [2] to include it" -ForegroundColor DarkGray }
+    if ($null -ne $users) {
+        $scan = if ($script:SignInScanDays -gt 0) { "sign-in scan: $($script:SignInScanDays) days" } else { 'no sign-in scan' }
+        Write-Host "    [OK] SMS/voice user hunt ($(@($users).Count) users, $scan, collected $($script:UserCollectedAt.ToString('yyyy-MM-dd HH:mm')))" -ForegroundColor Green
+    }
+    else { Write-Host "    [ ]  SMS/voice user hunt - not collected, run [3] to include it" -ForegroundColor DarkGray }
 
     $options = Show-OutputMenu
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
-    $policy = if ($script:PolicyFindings) { $script:PolicyFindings } else { Invoke-PolicyCheck -Quiet }
-    $users  = if ($null -ne $script:UserFindings) { $script:UserFindings } else { Invoke-SmsHunt -Quiet }
-
-    if ($null -eq $policy -and $null -eq $users) {
-        Write-Log "Nothing to report: both the policy check and the user hunt failed." -Level "ERROR"
-        return
-    }
-
     $cross = if ($null -ne $users) { @(Get-CrossCheckFindings -Users $users) } else { @() }
     $allPolicy = @($policy) + $cross | Where-Object { $_ }
-
-    Show-PolicyConsole -Findings $allPolicy
-    Show-UserConsole -Findings $users
 
     $exported = @()
     if ($options.Csv) {
@@ -2333,11 +2348,15 @@ function Invoke-FullReport {
     }
     if ($options.Html) {
         $tenantName = 'Unknown'
-        try {
-            $org = Invoke-GraphGet -Uri 'https://graph.microsoft.com/v1.0/organization?$select=displayName'
-            if ($org.value -and $org.value[0].displayName) { $tenantName = $org.value[0].displayName }
+        $ctx = Get-MgContext -ErrorAction SilentlyContinue
+        if ($ctx) {
+            $tenantName = $ctx.TenantId
+            try {
+                $org = Invoke-GraphGet -Uri 'https://graph.microsoft.com/v1.0/organization?$select=displayName'
+                if ($org.value -and $org.value[0].displayName) { $tenantName = $org.value[0].displayName }
+            }
+            catch { }
         }
-        catch { $tenantName = (Get-MgContext).TenantId }
 
         $dir = ".\exports"
         if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -2379,7 +2398,7 @@ try {
             '1' { Connect-ReportGraph;              Read-Host "  Press Enter to return to the menu" | Out-Null }
             '2' { Invoke-PolicyCheck | Out-Null;    Read-Host "  Press Enter to return to the menu" | Out-Null }
             '3' { Invoke-SmsHunt | Out-Null;        Read-Host "  Press Enter to return to the menu" | Out-Null }
-            '4' { Invoke-FullReport;                Read-Host "  Press Enter to return to the menu" | Out-Null }
+            '4' { Invoke-ExportReport;              Read-Host "  Press Enter to return to the menu" | Out-Null }
             'C' { Clear-ResultCache; Write-Host "  Cache cleared." -ForegroundColor Gray; Start-Sleep -Seconds 1 }
             'Q' { $running = $false }
             default {
