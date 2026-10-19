@@ -1781,7 +1781,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .card.pass .value { color: #388e3c; }
 .card.info .value { color: #1565c0; }
 .part-title { font-size: 1.4em; font-weight: 700; color: #1a237e; margin: 30px 0 4px; padding-bottom: 6px; border-bottom: 3px solid #1a237e; }
-.part-sub { font-size: 0.85em; color: #666; margin-bottom: 16px; }
+.part-sub { font-size: 1em; color: #1a237e; background: #e8eaf6; border-left: 5px solid #1a237e; border-radius: 6px; padding: 10px 14px; margin: 8px 0 18px; font-weight: 500; }
 .section-title { font-size: 1.1em; font-weight: 700; color: #1a237e; margin-bottom: 12px; }
 .policy-area { border: 1px solid #e8e8e8; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
 .policy-area-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f8f9fa; cursor: pointer; font-weight: 600; color: #1a237e; user-select: none; }
