@@ -352,4 +352,4 @@ IDEA-003-CertAppRegistration/
 ## Author
 
 Per-Torben Sørensen  
-Version: 1.4 | September 2026
+Version: 1.5 | October 2026

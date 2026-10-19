@@ -8,7 +8,7 @@ Read-only. No changes are made to the tenant.
 ## Script
 
 ### Get-SmsMfaReport.ps1
-Interactive menu-driven analysis with console, CSV and HTML output. The HTML report uses the same layout as I.D.E.A. 004.
+Interactive menu-driven analysis with console, CSV and HTML output. The HTML report uses the I.D.E.A. 004 visual style, split into a policy posture part and a user part.
 
 ## Features
 - **Scales to large tenants**: one bulk pull of the authentication methods registration report, then per-user phone detail only for users with a phone method registered
@@ -52,7 +52,7 @@ AuditLog.Read.All
 Policy.Read.All
 ```
 
-This is the I.D.E.A. 004 set without `CrossTenantInformation.ReadBasic.All`. An app registration made for 004 (or with [I.D.E.A. 003](../IDEA-003-CertAppRegistration/README.md)) works here. Tested with certificate app-only auth.
+This is the I.D.E.A. 004 set without `CrossTenantInformation.ReadBasic.All`. [I.D.E.A. 003](../IDEA-003-CertAppRegistration/README.md) has an **IDEA-005 — SMS MFA Hunter** permission bundle that grants exactly these scopes, either on a new certificate app or added to an existing one. Tested end to end with certificate app-only auth: an app with only `User.Read.All` fails the pre-flight check, and the same app passes after the bundle is applied.
 
 Graph **beta** is used for passkey profiles, registration campaign enforcement, system-preferred MFA and sign-in log `authenticationDetails` (v1.0 returns that property empty). Beta may change without notice; beta-only checks are skipped with a warning if the call fails.
 
@@ -121,7 +121,7 @@ The hunt asks how many days of sign-in logs to scan (default 7, 0 to skip). The 
 - The registration details report lags behind real registrations. Users missing from it are checked directly; recent changes for users already in it may not show yet.
 - Sign-in logs are ingested with a delay of several minutes. Very recent sign-ins may be missing from the scan.
 - Users who used SMS/voice in the scanned window are always included, even if the registration report does not show a phone method yet.
-- Sign-in log matching uses the `authenticationMethod` text (`Text message`, `Phone call`, ...). Validated against live data without SMS sign-ins; review the match pattern if your tenant reports different strings.
+- Sign-in log matching uses the `authenticationMethod` text (`Text message`, `Phone call`, ...). `Text message` is validated against live SMS sign-ins; `Phone call` is not yet. Review the match pattern if your tenant reports different strings.
 - Passkey profile to group mapping uses `includeTargets[].allowedPasskeyProfiles` as returned by Graph. Targets without that list are shown against the default profile.
 - When the registration campaign is in `default` (Microsoft-managed) state, its scope cannot be evaluated per user.
 

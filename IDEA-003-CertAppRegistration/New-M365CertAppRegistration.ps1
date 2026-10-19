@@ -52,8 +52,9 @@
 
 .NOTES
     Author  : Per-Torben Sørensen
-    Version : 1.0
+    Version : 1.5
     Created : March 2026
+    Updated : October 2026
 
     Prerequisites
     ─────────────
