@@ -58,7 +58,7 @@ Option **1** runs the full 5-step flow described below.
 
 Option **2** signs in to Graph, lets you filter and pick an existing app registration, shows
 the Graph permissions it already has, and then opens the same permission menu — including the
-IDEA-002, IDEA-004 and Entra Security Assessment bundles. Existing permissions on the app are
+IDEA-002, IDEA-004, IDEA-005 and Entra Security Assessment bundles. Existing permissions on the app are
 preserved; only the missing ones are added and admin-consented. A service principal is created
 if the app does not have one. The result is read back from the tenant before success is reported.
 
@@ -121,6 +121,7 @@ contains (duplicates are removed automatically):
 |---|---|
 | IDEA-002 — Privileged Account Report | `User.Read.All`, `Directory.Read.All`, `RoleManagement.Read.Directory`, `RoleEligibilitySchedule.Read.Directory`, `UserAuthenticationMethod.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Policy.Read.All`, `CrossTenantInformation.ReadBasic.All` |
 | IDEA-004 — Entra MFA Report | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`, `CrossTenantInformation.ReadBasic.All` |
+| IDEA-005 — SMS MFA Hunter | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All` |
 | Entra Security Assessment | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `UserAuthenticationMethod.Read.All`, `Policy.Read.All`, `Policy.Read.ConditionalAccess`, `RoleManagement.Read.Directory`, `RoleManagement.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `CrossTenantInformation.ReadBasic.All`, `AdministrativeUnit.Read.All`, `Application.Read.All`, `AuditLog.Read.All`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `DelegatedAdminRelationship.Read.All`, `SecurityEvents.Read.All` |
 
 Bundles can be combined — selecting both IDEA-002 and IDEA-004 grants the union of their scopes.
@@ -351,4 +352,4 @@ IDEA-003-CertAppRegistration/
 ## Author
 
 Per-Torben Sørensen  
-Version: 1.4 | September 2026
+Version: 1.5 | October 2026

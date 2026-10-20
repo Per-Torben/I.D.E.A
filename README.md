@@ -62,7 +62,7 @@ Interactive, menu-driven tool that creates Microsoft Entra ID app registrations 
 - Main menu: create new app registration(s), or **add permissions to an existing app registration**
 - Service selection menu: Microsoft Graph / Entra ID, Microsoft Teams, Exchange Online, SharePoint Online (single or all)
 - Certificate menu: create new self-signed (4096-bit RSA, configurable duration, default 180 days) or use an existing `.cer` file
-- Per-service permission review with toggle menu — the Graph menu defaults to `User.Read.All` only, plus one-click permission bundles for **I.D.E.A. 002**, **I.D.E.A. 004** and **Entra Security Assessment** (bundles can be combined; duplicates are removed)
+- Per-service permission review with toggle menu — the Graph menu defaults to `User.Read.All` only, plus one-click permission bundles for **I.D.E.A. 002**, **I.D.E.A. 004**, **I.D.E.A. 005** and **Entra Security Assessment** (bundles can be combined; duplicates are removed)
 - Existing app registrations can be topped up with those same bundles — current permissions are preserved, only what is missing is added and admin-consented
 - App name prefix prompt with full preview table of app names and output file names before creating
 - Creates one app registration per service, attaches shared certificate, grants admin consent
@@ -106,6 +106,28 @@ Interactive, menu-driven MFA report tool that generates a detailed Multi-Factor 
 **Use Case:** Provides security teams and administrators a comprehensive view of MFA adoption across the tenant, enabling them to identify high-risk accounts, prioritize remediation, and track MFA rollout progress. The HTML report enables non-technical stakeholders to explore data independently.
 
 📖 **[Full Documentation](IDEA-004-MFAReport/README.md)**
+
+---
+
+### [I.D.E.A. 005 – SMS MFA Hunter](IDEA-005-SmsHunter/)
+Interactive, menu-driven tool that finds every user with SMS or voice call registered as an MFA method, shows who actually uses it, and checks whether the tenant's authentication methods policy, registration campaign and passkey configuration will move them off it.
+
+**Key Capabilities**
+- Scales: bulk pre-filter via the registration details report, per-user calls only for users with a phone method
+- Phone detail: number, phone type, SMS sign-in state, effective default MFA method (system-preferred aware)
+- Sign-in log scan finds users who actually completed MFA with SMS/voice, highlighted as the key filter in the report
+- Policy posture: migration state, system-preferred MFA, every method configuration, SMS/Voice targets and SMS sign-in
+- Registration campaign: state, snooze, enforcement, targets and targeted method
+- Passkey profiles: types, attestation, key restrictions, which groups get which profile, TAP onboarding path; warns on an unchanged default profile and on synced passkeys without AAGUID restrictions
+- Cross-checks: users still allowed SMS/voice, outside the campaign, or unable to register a passkey
+- Risk = fallback category: High (SMS/voice only) → Medium (other MFA, no phishing-resistant) → Low (phishing-resistant, cleanup)
+- Collect with the policy check and user hunt, then export from that cached data
+- Self-contained HTML report in two parts (policy posture, then users), plus semicolon-delimited CSV
+- Required Graph permissions can be granted with the IDEA-005 bundle in I.D.E.A. 003
+
+**Use Case:** Plan and track the move away from SMS/voice MFA ahead of the 2027-02-01 retirement.
+
+📖 **[Full Documentation](IDEA-005-SmsHunter/README.md)**
 
 ---
 
