@@ -123,12 +123,14 @@ contains (duplicates are removed automatically):
 | IDEA-004 — Entra MFA Report | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`, `CrossTenantInformation.ReadBasic.All` |
 | IDEA-005 — SMS MFA Hunter | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All` |
 | Entra Assessment — Stage 1: Identity | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `UserAuthenticationMethod.Read.All`, `Policy.Read.All`, `Policy.Read.ConditionalAccess`, `Policy.Read.DeviceConfiguration`, `RoleManagement.Read.Directory`, `RoleManagement.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementConfiguration.Read.All`, `CrossTenantInformation.ReadBasic.All`, `AdministrativeUnit.Read.All`, `Application.Read.All`, `AuditLog.Read.All`, `Reports.Read.All`, `Domain.Read.All`, `Organization.Read.All`, `LicenseAssignment.Read.All`, `OnPremDirectorySynchronization.Read.All`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `DelegatedAdminRelationship.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All` |
-| Entra Assessment — Stage 2: Access governance | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `Application.Read.All`, `Organization.Read.All`, `EntitlementManagement.Read.All`, `AccessReview.Read.All`, `LifecycleWorkflows.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `RoleManagement.Read.Directory`, `Agreement.Read.All`, `Policy.Read.All`, `AuditLog.Read.All` |
-| Entra Assessment — Stage 3: Purview | `Directory.Read.All`, `Organization.Read.All`, `InformationProtectionPolicy.Read.All`, `RecordsManagement.Read.All`, `eDiscovery.Read.All`, `SubjectRightsRequest.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All` |
+| Entra Assessment — Stage 2: Access governance | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `Application.Read.All`, `Organization.Read.All`, `EntitlementManagement.Read.All`, `AccessReview.Read.All`, `LifecycleWorkflows.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `RoleManagement.Read.Directory`, `Policy.Read.All`, `AuditLog.Read.All` |
+| Entra Assessment — Stage 3: Purview | `Directory.Read.All`, `Organization.Read.All`, `InformationProtectionPolicy.Read.All`, `RecordsManagement.Read.All`, `eDiscovery.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All` |
 
 The three Entra Assessment bundles match `Get-EntraRequiredScope -Stage Identitet`, `Tilgangsstyring` and
 `Purview` in the [Entra-Security-Assessment](https://github.com/crayon/Entra-Security-Assessment) repo, using
-the app-only name for each scope. Select all three for an app that runs `-Stage Alle`. Stage 3 also reads
+the app-only name for each scope. `Agreement.Read.All` (terms of use) and `SubjectRightsRequest.Read.All` (subject rights requests) are left out of stages 2 and 3 on purpose. Microsoft only offers them as delegated permissions, so they cannot be added to an app-only registration. The assessment scripts record those two datasets as manual checks when they run app-only.
+
+Select all three for an app that runs `-Stage Alle`. Stage 3 also reads
 Purview data through Security and Compliance PowerShell, so register the **Exchange Online** service as well
 and keep the default **View-only** access level. That grants `Exchange.ManageAsApp` and the
 `View-Only Organization Management` role group, which also lets the assessment read the Purview role groups.

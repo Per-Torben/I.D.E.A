@@ -189,7 +189,8 @@ $script:EntraAssessmentStage1Permissions = @(
     'SecurityAlert.Read.All'
 )
 
-# Stage 2: Tilgangsstyring (access governance)
+# Stage 2: Tilgangsstyring (access governance). Agreement.Read.All is delegated-only (no application
+# permission exists), so terms of use are not available app-only and are left out.
 $script:EntraAssessmentStage2Permissions = @(
     'Directory.Read.All'
     'User.Read.All'
@@ -201,19 +202,18 @@ $script:EntraAssessmentStage2Permissions = @(
     'LifecycleWorkflows.Read.All'
     'PrivilegedAccess.Read.AzureADGroup'
     'RoleManagement.Read.Directory'
-    'Agreement.Read.All'
     'Policy.Read.All'
     'AuditLog.Read.All'
 )
 
 # Stage 3: Purview. The app-only name of the sensitivity label scope is .Read.All.
+# SubjectRightsRequest.Read.All is delegated-only, so subject rights requests are left out.
 $script:EntraAssessmentStage3Permissions = @(
     'Directory.Read.All'
     'Organization.Read.All'
     'InformationProtectionPolicy.Read.All'
     'RecordsManagement.Read.All'
     'eDiscovery.Read.All'
-    'SubjectRightsRequest.Read.All'
     'SecurityEvents.Read.All'
     'SecurityAlert.Read.All'
 )
@@ -1139,6 +1139,7 @@ function New-ServiceAppRegistration {
         ServicePrincipalId = $sp.Id
         ConsentSucceeded   = $consent.ConsentSucceeded
         ConsentFailed      = $consent.ConsentFailed
+        RequestedCount     = @($Permissions | ForEach-Object { "$($_.AppId)/$($_.Name)" } | Sort-Object -Unique).Count
     }
 }
 
@@ -2178,7 +2179,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             $result['Verification'] = Test-AppRegistrationDeployment `
                 -AppId                    $result.AppId `
                 -Thumbprint               $certificate.Thumbprint `
-                -ExpectedAssignments      $result.ConsentSucceeded `
+                -ExpectedAssignments      $result.RequestedCount `
                 -ExpectedRoleDefinitionId $verifyRoleId `
                 -ConnectionScriptPath     $scriptPath
 
