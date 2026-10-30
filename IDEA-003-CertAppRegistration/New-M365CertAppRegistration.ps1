@@ -27,7 +27,7 @@
 
     The main menu also offers a second mode: adding Microsoft Graph permissions to an app
     registration that already exists. It uses the same permission menu — including the
-    I.D.E.A. 002, I.D.E.A. 004, I.D.E.A. 005 and Entra Security Assessment bundles — preserves the
+    I.D.E.A. 002, I.D.E.A. 004, I.D.E.A. 005 and the three Entra Security Assessment stage bundles — preserves the
     permissions already on the app, grants admin consent for the missing ones, and verifies
     the result against the tenant.
 
@@ -156,27 +156,66 @@ $script:Idea005Permissions = @(
     'Policy.Read.All'
 )
 
-# Source: C:\Scripts\EntraSecurityAssesment\readme.md, section 2.1
-$script:EntraSecurityAssessmentPermissions = @(
+# Source: Get-EntraRequiredScope in the Entra-Security-Assessment repo (EntraAssessment.Common.psm1),
+# and README section 2.2.1. Keep these lists in sync with it. All are read-only application permissions.
+# Stage 1: Identitet
+$script:EntraAssessmentStage1Permissions = @(
     'Directory.Read.All'
     'User.Read.All'
     'Group.Read.All'
     'UserAuthenticationMethod.Read.All'
     'Policy.Read.All'
     'Policy.Read.ConditionalAccess'
+    'Policy.Read.DeviceConfiguration'
     'RoleManagement.Read.Directory'
     'RoleManagement.Read.All'
     'PrivilegedAccess.Read.AzureADGroup'
     'Device.Read.All'
     'DeviceManagementManagedDevices.Read.All'
+    'DeviceManagementConfiguration.Read.All'
     'CrossTenantInformation.ReadBasic.All'
     'AdministrativeUnit.Read.All'
     'Application.Read.All'
     'AuditLog.Read.All'
+    'Reports.Read.All'
+    'Domain.Read.All'
+    'Organization.Read.All'
+    'LicenseAssignment.Read.All'
+    'OnPremDirectorySynchronization.Read.All'
     'IdentityRiskyUser.Read.All'
     'IdentityRiskEvent.Read.All'
     'DelegatedAdminRelationship.Read.All'
     'SecurityEvents.Read.All'
+    'SecurityAlert.Read.All'
+)
+
+# Stage 2: Tilgangsstyring (access governance)
+$script:EntraAssessmentStage2Permissions = @(
+    'Directory.Read.All'
+    'User.Read.All'
+    'Group.Read.All'
+    'Application.Read.All'
+    'Organization.Read.All'
+    'EntitlementManagement.Read.All'
+    'AccessReview.Read.All'
+    'LifecycleWorkflows.Read.All'
+    'PrivilegedAccess.Read.AzureADGroup'
+    'RoleManagement.Read.Directory'
+    'Agreement.Read.All'
+    'Policy.Read.All'
+    'AuditLog.Read.All'
+)
+
+# Stage 3: Purview. The app-only name of the sensitivity label scope is .Read.All.
+$script:EntraAssessmentStage3Permissions = @(
+    'Directory.Read.All'
+    'Organization.Read.All'
+    'InformationProtectionPolicy.Read.All'
+    'RecordsManagement.Read.All'
+    'eDiscovery.Read.All'
+    'SubjectRightsRequest.Read.All'
+    'SecurityEvents.Read.All'
+    'SecurityAlert.Read.All'
 )
 
 $script:ServiceDefinitions = @{
@@ -209,11 +248,25 @@ $script:ServiceDefinitions = @{
                 Permissions = $script:Idea005Permissions
             }
             @{
-                Name        = 'Entra Security Assessment'
-                Description = 'Read-only scopes for the Entra security assessment export'
+                Name        = 'Entra Assessment — Stage 1: Identity'
+                Description = 'Read-only scopes for Invoke-EntraAssessmentExport.ps1'
                 Default     = $false
                 Type        = 'Application'
-                Permissions = $script:EntraSecurityAssessmentPermissions
+                Permissions = $script:EntraAssessmentStage1Permissions
+            }
+            @{
+                Name        = 'Entra Assessment — Stage 2: Access governance'
+                Description = 'Read-only scopes for Invoke-AccessGovernanceExport.ps1'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:EntraAssessmentStage2Permissions
+            }
+            @{
+                Name        = 'Entra Assessment — Stage 3: Purview'
+                Description = 'Scopes for Invoke-PurviewAssessmentExport.ps1 (add Exchange Online too)'
+                Default     = $false
+                Type        = 'Application'
+                Permissions = $script:EntraAssessmentStage3Permissions
             }
         )
         AdminRoleId   = $null
@@ -1151,7 +1204,7 @@ function Add-PermissionToExistingApp {
         grants admin consent.
     .DESCRIPTION
         Uses the same permission menu as a new registration, so the IDEA-002, IDEA-004, IDEA-005 and
-        Entra Security Assessment bundles can be applied to an app that already exists.
+        Entra Security Assessment stage bundles can be applied to an app that already exists.
         Existing permissions on the app are preserved.
     .OUTPUTS
         [bool] $true when every requested permission is consented on the app afterwards.

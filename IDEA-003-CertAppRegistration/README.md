@@ -58,7 +58,7 @@ Option **1** runs the full 5-step flow described below.
 
 Option **2** signs in to Graph, lets you filter and pick an existing app registration, shows
 the Graph permissions it already has, and then opens the same permission menu — including the
-IDEA-002, IDEA-004, IDEA-005 and Entra Security Assessment bundles. Existing permissions on the app are
+IDEA-002, IDEA-004, IDEA-005 and Entra Assessment stage bundles. Existing permissions on the app are
 preserved; only the missing ones are added and admin-consented. A service principal is created
 if the app does not have one. The result is read back from the tenant before success is reported.
 
@@ -122,7 +122,19 @@ contains (duplicates are removed automatically):
 | IDEA-002 — Privileged Account Report | `User.Read.All`, `Directory.Read.All`, `RoleManagement.Read.Directory`, `RoleEligibilitySchedule.Read.Directory`, `UserAuthenticationMethod.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Policy.Read.All`, `CrossTenantInformation.ReadBasic.All` |
 | IDEA-004 — Entra MFA Report | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`, `CrossTenantInformation.ReadBasic.All` |
 | IDEA-005 — SMS MFA Hunter | `User.Read.All`, `Directory.Read.All`, `UserAuthenticationMethod.Read.All`, `AuditLog.Read.All`, `Policy.Read.All` |
-| Entra Security Assessment | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `UserAuthenticationMethod.Read.All`, `Policy.Read.All`, `Policy.Read.ConditionalAccess`, `RoleManagement.Read.Directory`, `RoleManagement.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `CrossTenantInformation.ReadBasic.All`, `AdministrativeUnit.Read.All`, `Application.Read.All`, `AuditLog.Read.All`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `DelegatedAdminRelationship.Read.All`, `SecurityEvents.Read.All` |
+| Entra Assessment — Stage 1: Identity | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `UserAuthenticationMethod.Read.All`, `Policy.Read.All`, `Policy.Read.ConditionalAccess`, `Policy.Read.DeviceConfiguration`, `RoleManagement.Read.Directory`, `RoleManagement.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementConfiguration.Read.All`, `CrossTenantInformation.ReadBasic.All`, `AdministrativeUnit.Read.All`, `Application.Read.All`, `AuditLog.Read.All`, `Reports.Read.All`, `Domain.Read.All`, `Organization.Read.All`, `LicenseAssignment.Read.All`, `OnPremDirectorySynchronization.Read.All`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `DelegatedAdminRelationship.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All` |
+| Entra Assessment — Stage 2: Access governance | `Directory.Read.All`, `User.Read.All`, `Group.Read.All`, `Application.Read.All`, `Organization.Read.All`, `EntitlementManagement.Read.All`, `AccessReview.Read.All`, `LifecycleWorkflows.Read.All`, `PrivilegedAccess.Read.AzureADGroup`, `RoleManagement.Read.Directory`, `Agreement.Read.All`, `Policy.Read.All`, `AuditLog.Read.All` |
+| Entra Assessment — Stage 3: Purview | `Directory.Read.All`, `Organization.Read.All`, `InformationProtectionPolicy.Read.All`, `RecordsManagement.Read.All`, `eDiscovery.Read.All`, `SubjectRightsRequest.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All` |
+
+The three Entra Assessment bundles match `Get-EntraRequiredScope -Stage Identitet`, `Tilgangsstyring` and
+`Purview` in the [Entra-Security-Assessment](https://github.com/crayon/Entra-Security-Assessment) repo, using
+the app-only name for each scope. Select all three for an app that runs `-Stage Alle`. Stage 3 also reads
+Purview data through Security and Compliance PowerShell, so register the **Exchange Online** service as well
+and keep the default **View-only** access level. That grants `Exchange.ManageAsApp` and the
+`View-Only Organization Management` role group, which also lets the assessment read the Purview role groups.
+Some roles the assessment needs live outside this script (Azure `Reader`, Intune `Read Only Operator`);
+they are listed in section 2.7 of that README. If a Purview cmdlet is rejected under the view-only role
+group, the assessment README (section 2.2.2) names the Entra role to add instead.
 
 Bundles can be combined — selecting both IDEA-002 and IDEA-004 grants the union of their scopes.
 
