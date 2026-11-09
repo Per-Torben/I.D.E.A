@@ -122,8 +122,17 @@
     Microsoft.Graph and ExchangeOnlineManagement ship different MSAL versions and cannot both
     sign in INTERACTIVELY in one process - whichever authenticates second fails. An Exchange
     session the caller already established is reused directly and is unaffected. Only when no
-    session exists does the interactive Exchange sign-in run in a separate PowerShell process
+    session exists does the Exchange sign-in run in a separate PowerShell process
     (see Get-ExoMailboxType), so ExchangeOnlineManagement is never imported here on that path.
+
+    Exchange Online app-only via the Graph app
+    ------------------------------------------
+    When Graph is connected app-only with a certificate, menu option [2] checks whether the same
+    app can sign in to Exchange Online and, if so, uses it with no interactive prompt. The app needs:
+    - Application permission Office 365 Exchange Online > Exchange.ManageAsApp (admin consented)
+    - An Exchange role: an Entra role such as Global Reader or Exchange Recipient Administrator,
+      or membership in an Exchange role group (not visible to Graph, so verified by signing in)
+    - The certificate in Cert:\CurrentUser\My
 
     TROUBLESHOOTING - PERMISSION / CONSENT ERRORS (403 Authorization_RequestDenied):
     ---------------------------------------------------------------------------------
@@ -775,6 +784,84 @@ function Get-ExoMailboxTypeInSession {
     }
 }
 
+function Test-ExoAppOnlyAccess {
+    <#
+    .SYNOPSIS
+        Checks whether the app behind an app-only Graph connection can also sign in to Exchange Online.
+    .DESCRIPTION
+        Exchange Online app-only sign-in needs a certificate thumbprint, the Office 365 Exchange Online
+        Exchange.ManageAsApp application permission, the tenant's *.onmicrosoft.com domain, and an
+        Exchange role. Entra roles are reported, but Exchange role groups are invisible to Graph, so a
+        missing Entra role is not a blocker - the actual sign-in is the final check.
+    .OUTPUTS
+        [PSCustomObject] Ready, AppId, CertificateThumbprint, Organization, HasManageAsApp, Roles, Issues
+    #>
+    param([Parameter(Mandatory)] $Context)
+
+    $manageAsAppRoleId = 'dc50a0fb-09a3-484d-be87-e023b12c6440'
+    # Entra roles that include mailbox read access in Exchange Online.
+    $mailboxReadRoles = @{
+        '62e90394-69f5-4237-9190-012177145e10' = 'Global Administrator'
+        '29232cdf-9323-42fd-ade2-1d097af3e4de' = 'Exchange Administrator'
+        '31392ffb-586c-42d1-9346-e59415a2cf4e' = 'Exchange Recipient Administrator'
+        'f2ef992c-3afb-46b9-b7cf-a126ee74c451' = 'Global Reader'
+        '729827e3-9c14-49f7-bb1b-9608f156bbb8' = 'Helpdesk Administrator'
+    }
+
+    $issues = [System.Collections.Generic.List[string]]::new()
+    $result = [PSCustomObject]@{
+        Ready                 = $false
+        AppId                 = $Context.ClientId
+        CertificateThumbprint = $null
+        Organization          = $null
+        HasManageAsApp        = $false
+        Roles                 = @()
+        Issues                = $issues
+    }
+
+    if ($Context.AuthType -ne 'AppOnly') {
+        $issues.Add('Microsoft Graph is connected with a user account, not an app')
+        return $result
+    }
+
+    $result.CertificateThumbprint = if ($Context.CertificateThumbprint) { $Context.CertificateThumbprint }
+                                    elseif ($Context.Certificate) { $Context.Certificate.Thumbprint }
+    if (-not $result.CertificateThumbprint) {
+        $issues.Add("Graph was connected with $($Context.TokenCredentialType), not a certificate - Exchange Online app-only requires a certificate")
+    }
+
+    try {
+        $sp = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($Context.ClientId)'&`$select=id" -ErrorAction Stop).value |
+            Select-Object -First 1
+        if (-not $sp) { throw "no service principal found for app $($Context.ClientId)" }
+
+        $assignments = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" -ErrorAction Stop).value
+        $result.HasManageAsApp = [bool]($assignments | Where-Object { $_.appRoleId -eq $manageAsAppRoleId })
+        if (-not $result.HasManageAsApp) {
+            $issues.Add('Missing application permission Office 365 Exchange Online > Exchange.ManageAsApp (or admin consent not granted)')
+        }
+
+        $directoryRoles = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/memberOf/microsoft.graph.directoryRole?`$select=roleTemplateId" -ErrorAction Stop).value
+        $result.Roles = @($directoryRoles | Where-Object { $mailboxReadRoles.ContainsKey($_.roleTemplateId) } |
+            ForEach-Object { $mailboxReadRoles[$_.roleTemplateId] })
+    }
+    catch {
+        $issues.Add("Could not read the app's permissions from Graph: $($_.Exception.Message)")
+    }
+
+    try {
+        $result.Organization = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/domains?$select=id,isInitial' -ErrorAction Stop).value |
+            Where-Object { $_.isInitial } | ForEach-Object { $_.id } | Select-Object -First 1
+    }
+    catch { }
+    if (-not $result.Organization) {
+        $issues.Add('Could not resolve the *.onmicrosoft.com domain (needs Directory.Read.All or Domain.Read.All) - Exchange Online does not accept a tenant ID')
+    }
+
+    $result.Ready = $issues.Count -eq 0
+    return $result
+}
+
 function Get-ExoMailboxType {
     <#
     .SYNOPSIS
@@ -788,6 +875,10 @@ function Get-ExoMailboxType {
         both sign in interactively in one process: whichever authenticates second fails inside
         MSAL. A child process gives each module its own MSAL. Reusing a session the caller
         already established is safe because no second interactive sign-in takes place.
+
+        When Graph is connected app-only, the same app and certificate are used for Exchange
+        Online if Test-ExoAppOnlyAccess finds the required permissions. Interactive sign-in is
+        offered if the check fails or the app-only sign-in is rejected.
     .OUTPUTS
         [hashtable] lowercase UPN -> RecipientTypeDetails, or $null when unavailable.
     #>
@@ -803,34 +894,71 @@ function Get-ExoMailboxType {
         return Get-ExoMailboxTypeInSession
     }
 
-    Write-Host ""
-    Write-Host "  ┌─────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  Exchange Online is OPTIONAL.                                    │" -ForegroundColor Yellow
-    Write-Host "  │  Without it, shared/room/equipment mailbox detection will use    │" -ForegroundColor Yellow
-    Write-Host "  │  heuristics instead of authoritative RecipientTypeDetails.       │" -ForegroundColor Yellow
-    Write-Host "  │  MFA data and risk analysis are NOT affected.                    │" -ForegroundColor Yellow
-    Write-Host "  │                                                                  │" -ForegroundColor Yellow
-    Write-Host "  │  To use an app-only connection instead, run Connect-             │" -ForegroundColor Yellow
-    Write-Host "  │  ExchangeOnline yourself before starting this script.            │" -ForegroundColor Yellow
-    Write-Host "  └─────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-    Write-Host ""
+    $appOnly = $null
+    $graphCtx = Get-MgContext -ErrorAction SilentlyContinue
+    if ($graphCtx -and $graphCtx.AuthType -eq 'AppOnly') {
+        Write-Host ""
+        Write-Host "  Checking whether the Graph app ($($graphCtx.ClientId)) can sign in to Exchange Online..." -ForegroundColor Yellow
+        $check = Test-ExoAppOnlyAccess -Context $graphCtx
 
-    $confirm = Read-Host "  Retrieve mailbox types from Exchange Online? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') {
-        Write-Host "  Skipped Exchange Online." -ForegroundColor DarkGray
-        return $null
+        $certLabel = if ($check.CertificateThumbprint) { $check.CertificateThumbprint } else { 'not available' }
+        $orgLabel = if ($check.Organization) { $check.Organization } else { 'not resolved' }
+        $roleLabel = if ($check.Roles) { $check.Roles -join ', ' } else { 'none found (an Exchange role group may still grant access)' }
+        Write-Host "    Certificate             : $certLabel" -ForegroundColor Gray
+        Write-Host "    Exchange.ManageAsApp    : $(if ($check.HasManageAsApp) { 'granted' } else { 'NOT granted' })" -ForegroundColor Gray
+        Write-Host "    Organization            : $orgLabel" -ForegroundColor Gray
+        Write-Host "    Entra role (mailbox read): $roleLabel" -ForegroundColor Gray
+
+        if ($check.Ready) {
+            Write-Host "  ✓ App has the required Exchange Online permissions - using app-only sign-in" -ForegroundColor Green
+            Write-Log "Exchange app-only check passed for AppId $($check.AppId) (roles: $roleLabel)" -Level "INFO"
+            $appOnly = $check
+        }
+        else {
+            Write-Host "  ✗ App cannot sign in to Exchange Online app-only:" -ForegroundColor Red
+            foreach ($issue in $check.Issues) { Write-Host "      - $issue" -ForegroundColor Red }
+            Write-Log "Exchange app-only check failed for AppId $($check.AppId): $($check.Issues -join '; ')" -Level "WARNING"
+        }
+    }
+
+    if (-not $appOnly) {
+        Write-Host ""
+        Write-Host "  ┌─────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+        Write-Host "  │  Exchange Online is OPTIONAL.                                    │" -ForegroundColor Yellow
+        Write-Host "  │  Without it, shared/room/equipment mailbox detection will use    │" -ForegroundColor Yellow
+        Write-Host "  │  heuristics instead of authoritative RecipientTypeDetails.       │" -ForegroundColor Yellow
+        Write-Host "  │  MFA data and risk analysis are NOT affected.                    │" -ForegroundColor Yellow
+        Write-Host "  └─────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+        Write-Host ""
+
+        $confirm = Read-Host "  Sign in to Exchange Online interactively to retrieve mailbox types? (Y/N)"
+        if ($confirm -notmatch '^[Yy]') {
+            Write-Host "  Skipped Exchange Online." -ForegroundColor DarkGray
+            return $null
+        }
     }
 
     $childScript = @'
-param([Parameter(Mandatory)] [string]$OutputPath)
+param(
+    [Parameter(Mandatory)] [string]$OutputPath,
+    [string]$AppId,
+    [string]$CertificateThumbprint,
+    [string]$Organization
+)
 
 $ErrorActionPreference = 'Stop'
 
 try {
     Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
-    Write-Host 'Connecting to Exchange Online (browser sign-in required)...'
-    Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+    if ($AppId) {
+        Write-Host "Connecting to Exchange Online app-only (AppId $AppId, $Organization)..."
+        Connect-ExchangeOnline -AppId $AppId -CertificateThumbprint $CertificateThumbprint -Organization $Organization -ShowBanner:$false -ErrorAction Stop
+    }
+    else {
+        Write-Host 'Connecting to Exchange Online (browser sign-in required)...'
+        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+    }
     Write-Host 'Connected to Exchange Online'
 
     Get-EXOMailbox -ResultSize Unlimited -Properties RecipientTypeDetails -ErrorAction Stop |
@@ -858,14 +986,26 @@ catch {
         $pwshPath = (Get-Process -Id $PID).Path
 
         Write-Host "  Launching separate process for Exchange Online (avoids MSAL conflict with Graph)..." -ForegroundColor Yellow
-        Write-Log "Launching child process for Exchange Online mailbox types" -Level "INFO"
 
-        & $pwshPath -NoProfile -File $tempScript -OutputPath $tempCsv 2>&1 |
-            ForEach-Object { Write-Log "  $_" -Level "INFO" }
+        while ($true) {
+            $childArgs = @('-NoProfile', '-File', $tempScript, '-OutputPath', $tempCsv)
+            if ($appOnly) {
+                $childArgs += @('-AppId', $appOnly.AppId, '-CertificateThumbprint', $appOnly.CertificateThumbprint, '-Organization', $appOnly.Organization)
+            }
+            Write-Log "Launching child process for Exchange Online mailbox types ($(if ($appOnly) { 'app-only' } else { 'interactive' }))" -Level "INFO"
 
-        $exitCode = $LASTEXITCODE
+            & $pwshPath @childArgs 2>&1 | ForEach-Object { Write-Log "  $_" -Level "INFO" }
+            $exitCode = $LASTEXITCODE
 
-        if ($exitCode -ne 0 -or -not (Test-Path $tempCsv)) {
+            if ($exitCode -eq 0 -and (Test-Path $tempCsv)) { break }
+
+            if ($appOnly) {
+                Write-Host "  ✗ App-only Exchange Online sign-in failed (exit code $exitCode)" -ForegroundColor Red
+                Write-Log "Exchange Online app-only child process failed with exit code $exitCode" -Level "WARNING"
+                $fallback = Read-Host "  Sign in to Exchange Online interactively instead? (Y/N)"
+                if ($fallback -match '^[Yy]') { $appOnly = $null; continue }
+            }
+
             Write-Host "  ✗ Exchange Online retrieval failed (exit code $exitCode) - heuristics will be used" -ForegroundColor Red
             Write-Log "Exchange Online child process failed with exit code $exitCode" -Level "WARNING"
             return $null

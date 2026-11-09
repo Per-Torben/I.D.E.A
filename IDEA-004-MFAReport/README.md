@@ -77,6 +77,14 @@ A B2B guest performs MFA in their home tenant, so their authentication methods a
 
 Exchange Online connectivity is also required for authoritative mailbox-type detection (shared/room/equipment). The script connects automatically via menu option [2] if no existing EXO session is found.
 
+If Microsoft Graph is connected **app-only with a certificate**, option [2] first checks whether that same app can sign in to Exchange Online and uses it without an interactive prompt. Requirements on the app:
+
+- Application permission **Office 365 Exchange Online > Exchange.ManageAsApp** with admin consent
+- An Exchange role — an Entra role such as **Global Reader** or **Exchange Recipient Administrator**, or membership in an Exchange role group (Graph cannot see role groups, so this is verified by the sign-in itself)
+- The certificate installed in `Cert:\CurrentUser\My`
+
+If the check or the app-only sign-in fails, the script lists the missing requirements and offers an interactive sign-in instead.
+
 ## Usage
 
 The script is fully interactive — launch it and use the menu:
